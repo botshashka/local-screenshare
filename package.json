@@ -1,0 +1,12 @@
+{
+  "name": "screenshare",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "selfsigned": "^5.5.0",
+    "ws": "^8.16.0"
+  }
+}

@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Screenshare Sender</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, sans-serif;
+    background: #0f0f0f;
+    color: #eee;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 24px;
+    padding: 32px;
+  }
+  h1 { font-size: 1.4rem; font-weight: 600; letter-spacing: 0.05em; }
+  .id-badge {
+    background: #1e40af;
+    color: #fff;
+    padding: 4px 14px;
+    border-radius: 999px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .status {
+    font-size: 0.9rem;
+    color: #888;
+    min-height: 1.2em;
+    text-align: center;
+  }
+  .status.connected { color: #4ade80; }
+  .status.error { color: #f87171; }
+  .picker { display: flex; gap: 16px; }
+  button {
+    background: #2563eb;
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    padding: 14px 36px;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  button:hover { background: #1d4ed8; }
+  button:disabled { background: #374151; color: #6b7280; cursor: default; }
+  video {
+    width: 100%;
+    max-width: 560px;
+    border-radius: 10px;
+    background: #111;
+    aspect-ratio: 16/9;
+    display: none;
+  }
+  video.visible { display: block; }
+</style>
+</head>
+<body>
+
+<h1>Screenshare Sender</h1>
+
+<div id="pickerScreen">
+  <div class="picker">
+    <button onclick="init('mac-a')">I'm Mac A</button>
+    <button onclick="init('mac-b')">I'm Mac B</button>
+  </div>
+</div>
+
+<div id="mainScreen" style="display:none;flex-direction:column;align-items:center;gap:24px;">
+  <span class="id-badge" id="idBadge">—</span>
+  <div class="status" id="status">Connecting to server…</div>
+  <button id="shareBtn" disabled>Share Screen</button>
+  <video id="preview" muted autoplay playsinline></video>
+</div>
+
+<script>
+const STUN = { iceServers: [] };
+const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
+
+function tweakSdp(sdp) {
+  const vp9Pts = [...sdp.matchAll(/a=rtpmap:(\d+) VP9\/90000/gi)].map(m => m[1]);
+  if (vp9Pts.length) {
+    sdp = sdp.replace(/^(m=video \S+ \S+ )([^\r\n]+)/m, (_, header, ptList) => {
+      const pts = ptList.trim().split(' ');
+      const reordered = [...vp9Pts, ...pts.filter(p => !vp9Pts.includes(p))];
+      return `${header}${reordered.join(' ')}`;
+    });
+  }
+  sdp = sdp.replace(/^(m=video [^\r\n]+)/m, '$1\r\nb=AS:6000');
+  const opusMatch = sdp.match(/a=rtpmap:(\d+) opus\/48000/);
+  if (opusMatch) {
+    const pt = opusMatch[1];
+    const fmtp = `a=fmtp:${pt} minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxaveragebitrate=510000;dtx=0`;
+    sdp = sdp.replace(new RegExp(`a=fmtp:${pt} [^\r\n]*`), fmtp);
+  }
+  return sdp;
+}
+
+// Auto-pick from URL param if present, otherwise show picker
+const paramId = new URLSearchParams(location.search).get('id');
+if (paramId) init(paramId);
+
+function init(id) {
+  document.getElementById('pickerScreen').style.display = 'none';
+  const main = document.getElementById('mainScreen');
+  main.style.display = 'flex';
+  document.getElementById('idBadge').textContent = id;
+  document.title = `Sender: ${id}`;
+  startSender(id);
+}
+
+function startSender(id) {
+  let pc = null;
+  let ws = null;
+  let stream = null;
+  let receiverReady = false;
+
+  const statusEl = document.getElementById('status');
+  const shareBtn = document.getElementById('shareBtn');
+  const preview = document.getElementById('preview');
+
+  function setStatus(msg, cls = '') {
+    statusEl.textContent = msg;
+    statusEl.className = 'status ' + cls;
+  }
+
+  async function makeOffer() {
+    if (pc) pc.close();
+    pc = new RTCPeerConnection(STUN);
+
+    for (const track of stream.getTracks()) pc.addTrack(track, stream);
+
+    pc.onicecandidate = ({ candidate }) => {
+      if (candidate) ws.send(JSON.stringify({ type: 'ice-candidate', to: 'receiver', from: id, candidate }));
+    };
+
+    pc.onconnectionstatechange = async () => {
+      if (pc.connectionState === 'connected') {
+        setStatus('Streaming to TV', 'connected');
+        for (const sender of pc.getSenders()) {
+          if (sender.track?.kind !== 'video') continue;
+          const params = sender.getParameters();
+          if (!params.encodings.length) params.encodings = [{}];
+          params.encodings[0].networkPriority = 'high';
+          params.encodings[0].priority = 'high';
+          await sender.setParameters(params).catch(() => {});
+        }
+      }
+      if (pc.connectionState === 'failed') {
+        setStatus('Connection failed — retrying…', 'error');
+        setTimeout(() => { if (stream && receiverReady) makeOffer(); }, 3000);
+      }
+    };
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    ws.send(JSON.stringify({ type: 'offer', to: 'receiver', from: id, sdp: tweakSdp(offer.sdp) }));
+  }
+
+  function connectWS() {
+    ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ type: 'register', id }));
+      setStatus('Connected to server — waiting for TV receiver…');
+      shareBtn.disabled = false;
+    };
+
+    ws.onmessage = async (e) => {
+      const msg = JSON.parse(e.data);
+
+      if (msg.type === 'receiver-ready') {
+        receiverReady = true;
+        setStatus('TV receiver connected', 'connected');
+        if (stream) await makeOffer();
+      }
+      if (msg.type === 'answer') {
+        await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: msg.sdp }));
+      }
+      if (msg.type === 'ice-candidate' && msg.candidate) {
+        await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+      }
+      if (msg.type === 'peer-disconnected') {
+        setStatus('TV disconnected — reconnecting when it returns…');
+        receiverReady = false;
+        pc?.close();
+        pc = null;
+      }
+      if (msg.type === 'request-reoffers' && stream) {
+        await makeOffer();
+      }
+    };
+
+    ws.onclose = () => {
+      setStatus('Server disconnected — retrying in 3s…', 'error');
+      shareBtn.disabled = true;
+      receiverReady = false;
+      setTimeout(connectWS, 3000);
+    };
+  }
+
+  shareBtn.addEventListener('click', async () => {
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: { ideal: 30, max: 30 }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, sampleRate: 48000, channelCount: 2 }
+      });
+      stream.getVideoTracks().forEach(t => { t.contentHint = 'detail'; });
+      preview.srcObject = stream;
+      preview.classList.add('visible');
+      shareBtn.textContent = 'Re-share Screen';
+
+      stream.getVideoTracks()[0].onended = () => {
+        setStatus('Screen share stopped');
+        stream = null;
+        preview.classList.remove('visible');
+        pc?.close();
+        pc = null;
+      };
+
+      if (receiverReady) await makeOffer();
+      else setStatus('Waiting for TV receiver…');
+    } catch (err) {
+      setStatus(`Error: ${err.message}`, 'error');
+    }
+  });
+
+  connectWS();
+}
+</script>
+</body>
+</html>
