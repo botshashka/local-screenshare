@@ -240,8 +240,21 @@ function createPC(senderId: string): RTCPeerConnection {
     video.muted = false;
     const slot = slots[senderId];
     if (!slot) return;
-    slot.classList.remove("disconnected");
-    slot.classList.add("connected");
+    // Keep the video hidden until the first frame is actually decoded.
+    // Revealing it the moment a track arrives shows the browser's native
+    // play-button placeholder for ~0.5s while it waits for frames.
+    const reveal = () => {
+      slot.classList.remove("disconnected");
+      slot.classList.add("connected");
+    };
+    const rvfc = (video as HTMLVideoElement & {
+      requestVideoFrameCallback?: (cb: () => void) => void;
+    }).requestVideoFrameCallback;
+    if (rvfc) {
+      rvfc.call(video, reveal);
+    } else {
+      video.addEventListener("playing", reveal, { once: true });
+    }
   };
 
   pc.onicecandidate = ({ candidate }) => {
