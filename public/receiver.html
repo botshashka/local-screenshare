@@ -235,9 +235,9 @@ const RES_HINTS = {
 function sendResHints(onlyFor) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   const hints = RES_HINTS[LAYOUTS[layoutIdx].cls] || { 'mac-a': 'full', 'mac-b': 'full' };
-  for (const [to, hint] of Object.entries(hints)) {
+  for (const [to, hintVal] of Object.entries(hints)) {
     if (onlyFor && to !== onlyFor) continue;
-    ws.send(JSON.stringify({ type: 'res-hint', to, from: 'receiver', hint }));
+    ws.send(JSON.stringify({ type: 'res-hint', to, from: 'receiver', hint: hintVal }));
   }
 }
 
@@ -253,7 +253,7 @@ function cycleLayout() {
 layoutBtn.addEventListener('click', cycleLayout);
 
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'l' || e.key === 'L' || e.key === ' ') {
+  if (e.key === 'l' || e.key === 'L' || e.key === ' ' || e.key === 'ColorF3Blue') {
     e.preventDefault();
     cycleLayout();
   }
@@ -340,7 +340,6 @@ function connectWS() {
 
   ws.onopen = () => {
     ws.send(JSON.stringify({ type: 'register', id: 'receiver' }));
-    sendResHints();
   };
 
   ws.onmessage = async (e) => {

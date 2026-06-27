@@ -137,6 +137,8 @@ function startSender(id) {
       if (sender.track?.kind !== 'video') continue;
       const params = sender.getParameters();
       if (!params.encodings.length) params.encodings = [{}];
+      params.encodings[0].networkPriority = 'high';
+      params.encodings[0].priority = 'high';
       params.encodings[0].maxBitrate = tier.maxBitrate;
       params.encodings[0].scaleResolutionDownBy = tier.scaleResolutionDownBy;
       await sender.setParameters(params).catch(() => {});
@@ -165,17 +167,7 @@ function startSender(id) {
     pc.onconnectionstatechange = async () => {
       if (pc.connectionState === 'connected') {
         setStatus('Streaming to TV', 'connected');
-        const tier = TIERS[currentHint] || TIERS.full;
-        for (const sender of pc.getSenders()) {
-          if (sender.track?.kind !== 'video') continue;
-          const params = sender.getParameters();
-          if (!params.encodings.length) params.encodings = [{}];
-          params.encodings[0].networkPriority = 'high';
-          params.encodings[0].priority = 'high';
-          params.encodings[0].maxBitrate = tier.maxBitrate;
-          params.encodings[0].scaleResolutionDownBy = tier.scaleResolutionDownBy;
-          await sender.setParameters(params).catch(() => {});
-        }
+        await applyHint(currentHint);
       }
       if (pc.connectionState === 'failed') {
         setStatus('Connection failed — retrying…', 'error');
