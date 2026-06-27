@@ -1,5 +1,6 @@
 import express, { type Request, type Response } from "express";
 import { WebSocket, WebSocketServer } from "ws";
+import * as http from "http";
 import * as https from "https";
 import { execSync } from "child_process";
 import { networkInterfaces } from "os";
@@ -41,14 +42,36 @@ if (!existsSync(keyFile) || !existsSync(certFile)) {
 }
 
 const app = express();
-app.use(express.static(path.join(__dirname, "..", "public")));
+app.use(
+  express.static(path.join(__dirname, "..", "public"), {
+    // LAN dev tool: never let a receiver (TVs cache aggressively) serve a stale
+    // client after a rebuild. cacheControl:false stops express from forcing its
+    // own max-age=0 over ours; no-store on HTML/JS then forces a fresh fetch
+    // each load, so HTML and its bundle can't drift out of sync.
+    cacheControl: false,
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith(".html") || filePath.endsWith(".js")) {
+        res.setHeader("Cache-Control", "no-store");
+      }
+    },
+  }),
+);
 app.get("/", (_req: Request, res: Response) => res.redirect("/receiver.html"));
 
-const server = https.createServer(
+// Two listeners share one signaling hub:
+//   • HTTPS — senders need a secure context for getDisplayMedia().
+//   • HTTP  — the TV receiver only *receives* WebRTC (no capture), so it needs
+//     no secure context. Some smart-TV browsers hang forever on a wss://
+//     handshake against a self-signed cert; plain ws:// has
+//     no TLS step to stall on. WebRTC media is P2P and origin-independent, so an
+//     http-origin receiver still pairs with the https-origin senders.
+const httpsServer = https.createServer(
   { key: readFileSync(keyFile), cert: readFileSync(certFile) },
   app,
 );
-const wss = new WebSocketServer({ server });
+const httpServer = http.createServer(app);
+const wssHttps = new WebSocketServer({ server: httpsServer });
+const wssHttp = new WebSocketServer({ server: httpServer });
 
 const clients = new Map<string, WebSocket>();
 
@@ -56,7 +79,7 @@ function send(ws: WebSocket, msg: object): void {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
 }
 
-wss.on("connection", (ws) => {
+function handleConnection(ws: WebSocket): void {
   let clientId: string | null = null;
 
   ws.on("message", (raw) => {
@@ -73,12 +96,15 @@ wss.on("connection", (ws) => {
       console.log(`[+] ${clientId}`);
 
       if (clientId === "receiver") {
+        // Set up the receiver (sender-connected) before telling senders to
+        // (re)offer (receiver-ready), mirroring the sender branch below, so the
+        // receiver's peer connection exists before an offer can arrive.
+        for (const id of SENDER_IDS) {
+          if (clients.has(id)) send(ws, { type: "sender-connected", id });
+        }
         for (const id of SENDER_IDS) {
           const sender = clients.get(id);
           if (sender) send(sender, { type: "receiver-ready" });
-        }
-        for (const id of SENDER_IDS) {
-          if (clients.has(id)) send(ws, { type: "sender-connected", id });
         }
       } else {
         const receiver = clients.get("receiver");
@@ -96,6 +122,10 @@ wss.on("connection", (ws) => {
     }
   });
 
+  // Swallow per-socket errors so an abrupt drop can't surface as an unhandled
+  // 'error' event; the 'close' that follows handles cleanup.
+  ws.on("error", () => {});
+
   ws.on("close", () => {
     if (!clientId) return;
     clients.delete(clientId);
@@ -111,29 +141,43 @@ wss.on("connection", (ws) => {
       if (receiver) send(receiver, { type: "peer-disconnected", id: clientId });
     }
   });
-});
+}
+wssHttps.on("connection", handleConnection);
+wssHttp.on("connection", handleConnection);
 
 const PORT = process.env["PORT"] ? parseInt(process.env["PORT"], 10) : 4242;
-server.listen(PORT, "0.0.0.0", () => {
-  const lanIp = ips.find((ip) => ip !== "127.0.0.1") ?? "localhost";
-  console.log(`\nScreenshare running on https://${lanIp}:${PORT}`);
+// HTTP receiver port sits right after the HTTPS port; override with HTTP_PORT.
+const HTTP_PORT = process.env["HTTP_PORT"] ? parseInt(process.env["HTTP_PORT"], 10) : PORT + 1;
+
+const lanIp = ips.find((ip) => ip !== "127.0.0.1") ?? "localhost";
+httpsServer.listen(PORT, "0.0.0.0", () => {
+  console.log(
+    `\nScreenshare running on https://${lanIp}:${PORT} (senders) + http://${lanIp}:${HTTP_PORT} (TV)`,
+  );
   console.log(`\n  Device A:   https://${lanIp}:${PORT}/sender.html?id=device-a`);
   console.log(`  Device B:   https://${lanIp}:${PORT}/sender.html?id=device-b`);
-  console.log(`  TV:         https://${lanIp}:${PORT}/receiver.html`);
+  console.log(`  TV:         http://${lanIp}:${HTTP_PORT}/receiver.html`);
   console.log(
-    `\n  ⚠  Click "Advanced" → "Proceed" on each device to bypass the self-signed cert warning.\n`,
+    `\n  ⚠  Senders: click "Advanced" → "Proceed" to bypass the self-signed cert warning.` +
+      `\n     TV: open the plain http:// URL above — no cert prompt, and it avoids the wss:// hang` +
+      `\n     some smart-TV browsers have with self-signed certs.\n`,
   );
 });
+httpServer.listen(HTTP_PORT, "0.0.0.0");
 
 function onServerError(err: NodeJS.ErrnoException): void {
   if (err.code === "EADDRINUSE") {
-    console.error(`\nPort ${PORT} is already in use. Set PORT= to use another.\n`);
+    console.error(
+      `\nPort ${PORT}/${HTTP_PORT} is already in use. Set PORT= / HTTP_PORT= to use others.\n`,
+    );
   } else {
     console.error(err);
   }
   process.exit(1);
 }
 // ws re-emits the http server's 'error' on the WebSocketServer instance, so a
-// listen failure (e.g. EADDRINUSE) surfaces there — handle both to be safe.
-server.on("error", onServerError);
-wss.on("error", onServerError);
+// listen failure (e.g. EADDRINUSE) surfaces there — handle all to be safe.
+httpsServer.on("error", onServerError);
+httpServer.on("error", onServerError);
+wssHttps.on("error", onServerError);
+wssHttp.on("error", onServerError);

@@ -7,6 +7,14 @@
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
+  /* TV-remote color palette, reused for the legend and per-device accents */
+  :root {
+    --c-red: #e5484d;
+    --c-green: #30a46c;
+    --c-yellow: #f5d90a;
+    --c-blue: #60a5fa;
+  }
+
   body {
     background: #000;
     width: 100vw;
@@ -28,6 +36,10 @@
     overflow: hidden;
     transition: all 0.25s ease;
   }
+
+  /* Per-device accent (matches its remote button), used by the side-by-side name tag */
+  #slotA { --accent: var(--c-red); }
+  #slotB { --accent: var(--c-green); }
 
   .slot video {
     width: 100%;
@@ -54,6 +66,27 @@
   }
   .slot.connected .overlay { display: none; }
   .slot.disconnected .overlay { display: flex; }
+
+  /* ── Per-device name tag (shown under each pane in side-by-side) ── */
+  .slot .tag {
+    position: absolute;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: none;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 14px;
+    border-radius: 999px;
+    background: rgba(0,0,0,0.55);
+    backdrop-filter: blur(6px);
+    color: rgba(255,255,255,0.85);
+    font-size: 0.8rem;
+    pointer-events: none;
+    z-index: 5;
+  }
+  .slot .tag .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); flex: none; }
+  body.side-by-side .slot.connected .tag { display: flex; }
 
   @keyframes pulse {
     0%, 100% { opacity: 0.25; transform: scale(1); }
@@ -103,7 +136,9 @@
     transition: opacity 0.3s;
     z-index: 100;
   }
-  #controls:focus-within,
+  /* Visibility is driven solely by the idle timer — not by focus, or the bar
+     would stay pinned open whenever the layout button holds focus (e.g. after a
+     TV remote color-button press) and never auto-hide. */
   body:not(.idle) #controls { opacity: 1; }
 
   #layoutBtn {
@@ -153,6 +188,44 @@
     white-space: nowrap;
   }
   #hint.show { opacity: 1; }
+
+  /* ── Color-key legend (shown on a TV color-button press) ── */
+  #legend {
+    position: fixed;
+    top: 24px;
+    left: 50%;
+    transform: translateX(-50%) translateY(-8px);
+    display: flex;
+    gap: 10px;
+    padding: 10px;
+    background: rgba(0,0,0,0.72);
+    backdrop-filter: blur(8px);
+    border-radius: 999px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.25s, transform 0.25s;
+    z-index: 200;
+  }
+  #legend.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #legend .pill {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    font-size: 0.8rem;
+    color: rgba(255,255,255,0.55);
+    background: rgba(255,255,255,0.06);
+    white-space: nowrap;
+    transition: color 0.2s, background 0.2s, opacity 0.2s;
+  }
+  #legend .pill .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  #legend .pill[data-color="red"] .dot { background: var(--c-red); }
+  #legend .pill[data-color="green"] .dot { background: var(--c-green); }
+  #legend .pill[data-color="yellow"] .dot { background: var(--c-yellow); }
+  #legend .pill[data-color="blue"] .dot { background: var(--c-blue); }
+  #legend .pill.active { color: #fff; background: rgba(255,255,255,0.18); }
+  #legend .pill.dim { opacity: 0.4; }
 </style>
 </head>
 <body>
@@ -164,6 +237,7 @@
       <div class="ring"></div>
       <span>Waiting for Device A…</span>
     </div>
+    <div class="tag"><span class="dot"></span>Device A</div>
   </div>
   <div class="slot disconnected" id="slotB">
     <video id="videoB" autoplay playsinline></video>
@@ -171,16 +245,23 @@
       <div class="ring"></div>
       <span>Waiting for Device B…</span>
     </div>
+    <div class="tag"><span class="dot"></span>Device B</div>
   </div>
 </div>
 
 <div id="controls">
-  <button id="layoutBtn" autofocus>
+  <button id="layoutBtn">
     <span id="layoutLabel">Side by Side</span>
     <span class="dots" id="layoutDots"></span>
   </button>
 </div>
-<div id="hint">Press L, Space, or Blue button to switch layout</div>
+<div id="legend">
+  <span class="pill" data-color="red"><span class="dot"></span>Device A</span>
+  <span class="pill" data-color="green"><span class="dot"></span>Device B</span>
+  <span class="pill" data-color="yellow"><span class="dot"></span>Side by Side</span>
+  <span class="pill" data-color="blue"><span class="dot"></span><span id="blueLabel">Hide Device B</span></span>
+</div>
+<div id="hint">L / Space cycles layouts — or use the colored remote buttons</div>
 
 <script type="module" src="/js/receiver.js"></script>
 </body>

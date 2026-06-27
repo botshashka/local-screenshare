@@ -27,25 +27,70 @@ let layoutIdx = Math.max(
   LAYOUTS.findIndex((l) => l.cls === localStorage.getItem("layout")),
 );
 
+// Remembered "show the other device in the corner" preference, so turning the
+// corner off persists when you pass through Side by Side and focus again. A
+// focus layout in storage is authoritative; otherwise fall back to the pref.
+let showSecondary = localStorage.getItem("showSecondary") !== "false";
+const initialCls = LAYOUTS[layoutIdx]?.cls;
+if (initialCls === "solo-a" || initialCls === "solo-b") showSecondary = false;
+else if (initialCls === "pip-a" || initialCls === "pip-b") showSecondary = true;
+
 const layoutBtn = document.getElementById("layoutBtn") as HTMLButtonElement;
 const layoutLabel = document.getElementById("layoutLabel") as HTMLElement;
 const layoutDots = document.getElementById("layoutDots") as HTMLElement;
 const hint = document.getElementById("hint") as HTMLElement;
+const legend = document.getElementById("legend") as HTMLElement;
+const blueLabel = document.getElementById("blueLabel") as HTMLElement;
 
 LAYOUTS.forEach(() => {
   const s = document.createElement("span");
-  layoutDots.appendChild(s);
+  layoutDots?.appendChild(s);
 });
 
 function updateLayoutUI(): void {
   const layout = LAYOUTS[layoutIdx];
-  if (!layout) return;
+  if (!layout || !layoutLabel || !layoutDots) return;
   layoutLabel.textContent = layout.label;
   layoutDots
     .querySelectorAll("span")
     .forEach((s, i) => s.classList.toggle("active", i === layoutIdx));
 }
 updateLayoutUI();
+
+// The color-key legend (top overlay) mirrors the four TV remote buttons.
+// Red/Green/Yellow are destinations highlighting the focused device; Blue
+// toggles the corner picture, so its label is contextual to the layout.
+type ColorName = "red" | "green" | "yellow";
+const LEGEND: Record<LayoutCls, { active: ColorName; blue: string; dim?: boolean }> = {
+  "side-by-side": { active: "yellow", blue: "Show in corner", dim: true },
+  "pip-a": { active: "red", blue: "Hide Device B" },
+  "solo-a": { active: "red", blue: "Show Device B" },
+  "pip-b": { active: "green", blue: "Hide Device A" },
+  "solo-b": { active: "green", blue: "Show Device A" },
+};
+
+function updateLegend(): void {
+  const cls = LAYOUTS[layoutIdx]?.cls;
+  if (!cls || !legend || !blueLabel) return;
+  const info = LEGEND[cls];
+  legend
+    .querySelectorAll<HTMLElement>(".pill")
+    .forEach((p) => p.classList.toggle("active", p.dataset.color === info.active));
+  blueLabel.textContent = info.blue;
+  legend
+    .querySelector<HTMLElement>('.pill[data-color="blue"]')
+    ?.classList.toggle("dim", info.dim ?? false);
+}
+updateLegend();
+
+let legendTimer: ReturnType<typeof setTimeout>;
+function showLegend(): void {
+  if (!legend) return;
+  updateLegend();
+  legend.classList.add("show");
+  clearTimeout(legendTimer);
+  legendTimer = setTimeout(() => legend.classList.remove("show"), 4000);
+}
 
 const slots: Record<string, HTMLElement> = {
   "device-a": document.getElementById("slotA") as HTMLElement,
@@ -76,18 +121,47 @@ function sendResHints(onlyFor?: string): void {
 }
 
 function applyLayout(newIdx: number): void {
+  if (newIdx === layoutIdx) return;
   const prev = LAYOUTS[layoutIdx];
   if (prev) document.body.classList.remove(prev.cls);
   layoutIdx = newIdx;
   const next = LAYOUTS[layoutIdx];
   if (next) document.body.classList.add(next.cls);
   localStorage.setItem("layout", next?.cls ?? "");
+  if (next?.cls === "pip-a" || next?.cls === "pip-b") showSecondary = true;
+  else if (next?.cls === "solo-a" || next?.cls === "solo-b") showSecondary = false;
+  localStorage.setItem("showSecondary", String(showSecondary));
   updateLayoutUI();
+  updateLegend();
   sendResHints();
 }
 
 function cycleLayout(): void {
   applyLayout((layoutIdx + 1) % LAYOUTS.length);
+}
+
+function applyByCls(cls: LayoutCls): void {
+  const idx = LAYOUTS.findIndex((l) => l.cls === cls);
+  if (idx >= 0) applyLayout(idx);
+}
+
+// Focus a device, honoring the remembered corner preference — so a hidden
+// corner stays hidden (and "fullscreen single" stays fullscreen) as you flip
+// A↔B or pass through Side by Side.
+function focusDevice(dev: "a" | "b"): void {
+  applyByCls(showSecondary ? `pip-${dev}` : `solo-${dev}`);
+}
+
+function sideBySide(): void {
+  applyByCls("side-by-side");
+}
+
+// Blue: show/hide the non-focused device in the corner. No-op on side-by-side.
+function toggleSecondary(): void {
+  const cls = LAYOUTS[layoutIdx]?.cls;
+  if (cls === "side-by-side" || !cls) return;
+  const dev = cls.endsWith("-a") ? "a" : "b";
+  applyByCls(cls.startsWith("pip") ? `solo-${dev}` : `pip-${dev}`);
 }
 
 function markDisconnected(id: string): void {
@@ -100,23 +174,40 @@ function markDisconnected(id: string): void {
   if (video) video.srcObject = null;
 }
 
-layoutBtn.addEventListener("click", cycleLayout);
+layoutBtn?.addEventListener("click", cycleLayout);
+
+// TV remote color buttons drive direct selection, with r/g/y/b as desktop
+// equivalents. e.key carries "ColorFxName" on modern firmware; keyCode 403–406
+// is the fallback for sets that don't.
+const REMOTE_ACTIONS = [
+  { key: "ColorF0Red", letter: "r", code: 403, run: () => focusDevice("a") },
+  { key: "ColorF1Green", letter: "g", code: 404, run: () => focusDevice("b") },
+  { key: "ColorF2Yellow", letter: "y", code: 405, run: sideBySide },
+  { key: "ColorF3Blue", letter: "b", code: 406, run: toggleSecondary },
+] as const;
 
 document.addEventListener("keydown", (e) => {
-  if (e.key === "l" || e.key === "L" || e.key === " " || e.key === "ColorF3Blue") {
+  if (e.key === "l" || e.key === "L" || e.key === " ") {
     e.preventDefault();
     cycleLayout();
+    return;
+  }
+  const letter = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  const match = REMOTE_ACTIONS.find(
+    (a) => a.key === e.key || a.letter === letter || a.code === e.keyCode,
+  );
+  if (match) {
+    e.preventDefault();
+    match.run();
+    showLegend();
   }
 });
 
-document.getElementById("slotB")!.addEventListener("click", () => {
-  if (LAYOUTS[layoutIdx]?.cls === "pip-a") cycleLayout();
+document.getElementById("slotB")?.addEventListener("click", () => {
+  if (LAYOUTS[layoutIdx]?.cls === "pip-a") focusDevice("b");
 });
-document.getElementById("slotA")!.addEventListener("click", () => {
-  if (LAYOUTS[layoutIdx]?.cls === "pip-b") {
-    const pipAIdx = LAYOUTS.findIndex((l) => l.cls === "pip-a");
-    if (pipAIdx >= 0) applyLayout(pipAIdx);
-  }
+document.getElementById("slotA")?.addEventListener("click", () => {
+  if (LAYOUTS[layoutIdx]?.cls === "pip-b") focusDevice("a");
 });
 
 let idleTimer: ReturnType<typeof setTimeout>;
@@ -130,6 +221,7 @@ document.addEventListener("keydown", showControls);
 showControls();
 
 setTimeout(() => {
+  if (!hint) return;
   hint.classList.add("show");
   setTimeout(() => hint.classList.remove("show"), 3500);
 }, 800);
@@ -182,6 +274,8 @@ function createPC(senderId: string): RTCPeerConnection {
   return pc;
 }
 
+// Signaling doesn't depend on UI init: the DOM lookups above are guarded so
+// module init always reaches this call and the socket always opens.
 function connectWS(): void {
   ws = new WebSocket(wsUrl);
 
@@ -198,9 +292,13 @@ function connectWS(): void {
     }
 
     if (msg.type === "sender-connected") {
-      const pc = createPC(msg.id);
-      pc.addTransceiver("video", { direction: "recvonly" });
-      pc.addTransceiver("audio", { direction: "recvonly" });
+      // Idempotent: a late/duplicate sender-connected must not recreate (and so
+      // close, via createPC) a peer connection an earlier offer already set up.
+      if (!pcs[msg.id]) {
+        const pc = createPC(msg.id);
+        pc.addTransceiver("video", { direction: "recvonly" });
+        pc.addTransceiver("audio", { direction: "recvonly" });
+      }
       sendResHints(msg.id);
     }
 
