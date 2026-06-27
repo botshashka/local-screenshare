@@ -36,7 +36,10 @@
     display: block;
   }
 
-  /* ── Waiting overlay ── */
+  /* Hide native video placeholder when no source */
+  .slot.disconnected video { visibility: hidden; }
+
+  /* ── Empty state overlay ── */
   .slot .overlay {
     position: absolute;
     inset: 0;
@@ -44,18 +47,25 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 12px;
+    gap: 16px;
     color: #555;
-    font-size: 1rem;
+    font-size: 0.9rem;
     pointer-events: none;
-  }
-  .slot .overlay .dot {
-    width: 10px; height: 10px;
-    border-radius: 50%;
-    background: #333;
   }
   .slot.connected .overlay { display: none; }
   .slot.disconnected .overlay { display: flex; }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 0.25; transform: scale(1); }
+    50%       { opacity: 0.6;  transform: scale(1.08); }
+  }
+  .slot .overlay .ring {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    border: 2px solid #444;
+    animation: pulse 2s ease-in-out infinite;
+  }
 
   /* ── Layout: side-by-side ── */
   body.side-by-side #slotA { top: 0; left: 0; width: 50%; height: 100%; border-right: 2px solid #000; }
@@ -151,14 +161,14 @@
   <div class="slot disconnected" id="slotA">
     <video id="videoA" autoplay playsinline></video>
     <div class="overlay">
-      <div class="dot"></div>
+      <div class="ring"></div>
       <span>Waiting for Device A…</span>
     </div>
   </div>
   <div class="slot disconnected" id="slotB">
     <video id="videoB" autoplay playsinline></video>
     <div class="overlay">
-      <div class="dot"></div>
+      <div class="ring"></div>
       <span>Waiting for Device B…</span>
     </div>
   </div>
@@ -170,219 +180,8 @@
     <span class="dots" id="layoutDots"></span>
   </button>
 </div>
-<div id="hint">Press L or Space to switch layout</div>
+<div id="hint">Press L, Space, or Blue button to switch layout</div>
 
-<script>
-const STUN = { iceServers: [] };
-
-function tweakSdp(sdp) {
-  const vp9Pts = [...sdp.matchAll(/a=rtpmap:(\d+) VP9\/90000/gi)].map(m => m[1]);
-  if (vp9Pts.length) {
-    sdp = sdp.replace(/^(m=video \S+ \S+ )([^\r\n]+)/m, (_, header, ptList) => {
-      const pts = ptList.trim().split(' ');
-      const reordered = [...vp9Pts, ...pts.filter(p => !vp9Pts.includes(p))];
-      return `${header}${reordered.join(' ')}`;
-    });
-  }
-  const opusMatch = sdp.match(/a=rtpmap:(\d+) opus\/48000/);
-  if (opusMatch) {
-    const pt = opusMatch[1];
-    const fmtp = `a=fmtp:${pt} minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxaveragebitrate=510000;dtx=0`;
-    sdp = sdp.replace(new RegExp(`a=fmtp:${pt} [^\r\n]*`), fmtp);
-  }
-  return sdp;
-}
-const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
-
-const LAYOUTS = [
-  { cls: 'side-by-side', label: 'Side by Side' },
-  { cls: 'pip-a',        label: 'Device A Focus' },
-  { cls: 'pip-b',        label: 'Device B Focus' },
-  { cls: 'solo-a',       label: 'Device A Only' },
-  { cls: 'solo-b',       label: 'Device B Only' },
-];
-let layoutIdx = Math.max(0, LAYOUTS.findIndex(l => l.cls === localStorage.getItem('layout')));
-
-const layoutBtn = document.getElementById('layoutBtn');
-const layoutLabel = document.getElementById('layoutLabel');
-const layoutDots = document.getElementById('layoutDots');
-const hint = document.getElementById('hint');
-
-// Build dots
-LAYOUTS.forEach(() => { const s = document.createElement('span'); layoutDots.appendChild(s); });
-function updateLayoutUI() {
-  layoutLabel.textContent = LAYOUTS[layoutIdx].label;
-  layoutDots.querySelectorAll('span').forEach((s, i) => s.classList.toggle('active', i === layoutIdx));
-}
-updateLayoutUI();
-
-const slots = { 'device-a': document.getElementById('slotA'), 'device-b': document.getElementById('slotB') };
-const videos = { 'device-a': document.getElementById('videoA'), 'device-b': document.getElementById('videoB') };
-
-// Peer connections
-const pcs = {};
-
-document.body.classList.add(LAYOUTS[layoutIdx].cls);
-
-const RES_HINTS = {
-  'side-by-side': { 'device-a': 'side', 'device-b': 'side' },
-  'pip-a':        { 'device-a': 'full', 'device-b': 'pip'  },
-  'pip-b':        { 'device-a': 'pip',  'device-b': 'full' },
-  'solo-a':       { 'device-a': 'full', 'device-b': 'pip'  },
-  'solo-b':       { 'device-a': 'pip',  'device-b': 'full' },
-};
-
-function sendResHints(onlyFor) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const hints = RES_HINTS[LAYOUTS[layoutIdx].cls] || { 'device-a': 'full', 'device-b': 'full' };
-  for (const [to, hintVal] of Object.entries(hints)) {
-    if (onlyFor && to !== onlyFor) continue;
-    ws.send(JSON.stringify({ type: 'res-hint', to, from: 'receiver', hint: hintVal }));
-  }
-}
-
-function cycleLayout() {
-  document.body.classList.remove(LAYOUTS[layoutIdx].cls);
-  layoutIdx = (layoutIdx + 1) % LAYOUTS.length;
-  document.body.classList.add(LAYOUTS[layoutIdx].cls);
-  localStorage.setItem('layout', LAYOUTS[layoutIdx].cls);
-  updateLayoutUI();
-  sendResHints();
-}
-
-layoutBtn.addEventListener('click', cycleLayout);
-
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'l' || e.key === 'L' || e.key === ' ' || e.key === 'ColorF3Blue') {
-    e.preventDefault();
-    cycleLayout();
-  }
-});
-
-// Click PiP slot to swap focus
-document.getElementById('slotB').addEventListener('click', () => {
-  if (LAYOUTS[layoutIdx].cls === 'pip-a') { cycleLayout(); } // pip-a → pip-b
-});
-document.getElementById('slotA').addEventListener('click', () => {
-  if (LAYOUTS[layoutIdx].cls === 'pip-b') {
-    document.body.classList.remove(LAYOUTS[layoutIdx].cls);
-    layoutIdx = LAYOUTS.findIndex(l => l.cls === 'pip-a');
-    document.body.classList.add(LAYOUTS[layoutIdx].cls);
-    localStorage.setItem('layout', LAYOUTS[layoutIdx].cls);
-    updateLayoutUI();
-  }
-});
-
-// Show controls on mouse move / remote nav, hide after idle
-let idleTimer;
-function showControls() {
-  document.body.classList.remove('idle');
-  clearTimeout(idleTimer);
-  idleTimer = setTimeout(() => document.body.classList.add('idle'), 4000);
-}
-document.addEventListener('mousemove', showControls);
-document.addEventListener('keydown', showControls);
-showControls();
-
-// Show hint briefly on load
-setTimeout(() => { hint.classList.add('show'); setTimeout(() => hint.classList.remove('show'), 3500); }, 800);
-
-// ── WebRTC ──
-
-function createPC(senderId) {
-  if (pcs[senderId]) pcs[senderId].close();
-
-  const pc = new RTCPeerConnection(STUN);
-  pcs[senderId] = pc;
-
-  pc.ontrack = (e) => {
-    const video = videos[senderId];
-    if (!video.srcObject) video.srcObject = new MediaStream();
-    video.srcObject.addTrack(e.track);
-    // Unmute on first real track (browser autoplay policy satisfied by user interaction on layout button)
-    video.muted = false;
-    slots[senderId].classList.remove('disconnected');
-    slots[senderId].classList.add('connected');
-  };
-
-  pc.onicecandidate = ({ candidate }) => {
-    if (candidate) ws.send(JSON.stringify({ type: 'ice-candidate', to: senderId, from: 'receiver', candidate }));
-  };
-
-  pc.onconnectionstatechange = () => {
-    if (pc.connectionState === 'connected') {
-      // Minimize jitter buffer delay (Chrome 117+)
-      pc.getReceivers().forEach(r => {
-        if ('jitterBufferTarget' in r) r.jitterBufferTarget = 50;
-      });
-    }
-    if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-      slots[senderId].classList.remove('connected');
-      slots[senderId].classList.add('disconnected');
-      videos[senderId].srcObject = null;
-      // Ask the sender to re-offer
-      setTimeout(() => {
-        if (ws.readyState === WebSocket.OPEN)
-          ws.send(JSON.stringify({ type: 'request-reoffers', to: senderId }));
-      }, 2000);
-    }
-  };
-
-  return pc;
-}
-
-// ── Signaling ──
-
-let ws;
-
-function connectWS() {
-  ws = new WebSocket(wsUrl);
-
-  ws.onopen = () => {
-    ws.send(JSON.stringify({ type: 'register', id: 'receiver' }));
-  };
-
-  ws.onmessage = async (e) => {
-    const msg = JSON.parse(e.data);
-
-    if (msg.type === 'sender-connected') {
-      const pc = createPC(msg.id);
-      // Add recvonly transceivers so we're ready for the offer
-      pc.addTransceiver('video', { direction: 'recvonly' });
-      pc.addTransceiver('audio', { direction: 'recvonly' });
-      sendResHints(msg.id);
-    }
-
-    if (msg.type === 'offer') {
-      const senderId = msg.from;
-      let pc = pcs[senderId];
-      if (!pc) pc = createPC(senderId);
-
-      await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: msg.sdp }));
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      ws.send(JSON.stringify({ type: 'answer', to: senderId, from: 'receiver', sdp: tweakSdp(answer.sdp) }));
-    }
-
-    if (msg.type === 'ice-candidate' && msg.candidate) {
-      const pc = pcs[msg.from];
-      if (pc) await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
-    }
-
-    if (msg.type === 'peer-disconnected') {
-      const id = msg.id;
-      slots[id]?.classList.remove('connected');
-      slots[id]?.classList.add('disconnected');
-      if (videos[id]) videos[id].srcObject = null;
-      pcs[id]?.close();
-      delete pcs[id];
-    }
-  };
-
-  ws.onclose = () => setTimeout(connectWS, 3000);
-}
-
-connectWS();
-</script>
+<script type="module" src="/js/receiver.js"></script>
 </body>
 </html>

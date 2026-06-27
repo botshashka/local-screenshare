@@ -5,17 +5,18 @@ Stream your screen to a TV or another device on the same network — no accounts
 ## Requirements
 
 - [Node.js](https://nodejs.org) 18+
+- [pnpm](https://pnpm.io) (`corepack enable` will provide it)
 - `openssl` on the host machine (used once to generate a self-signed cert)
 - A browser that supports `getDisplayMedia` on each device (Chrome, Edge, Safari 13+)
 
 ## Setup
 
 ```bash
-npm install
-npm start
+pnpm install
+pnpm start
 ```
 
-The server prints three URLs on startup — open each on the relevant device.
+`pnpm start` compiles the TypeScript (server + browser bundles) and then launches the server, which prints three URLs on startup — open each on the relevant device.
 
 ## Usage
 
@@ -42,6 +43,17 @@ The receiver cycles through five layouts via the button at the bottom, **L / Spa
 | Device B Only | A hidden |
 
 Click a picture-in-picture corner to swap focus. The layout is saved across page reloads.
+
+## Development
+
+The source is TypeScript under `src/` — `src/server.ts` (Node) and `src/client/` (browser). The build compiles the server to `dist/` and the browser bundles to `public/js/` (both git-ignored).
+
+```bash
+pnpm build    # compile server + browser bundles
+pnpm dev      # rebuild + watch sources and restart the server on change
+pnpm lint     # oxlint
+pnpm format   # oxfmt
+```
 
 ## How it works
 
