@@ -47,6 +47,22 @@ Focusing a device keeps the other one in the corner; press blue to hide it (full
 
 On a desktop you can also cycle the layouts with the on-screen button at the bottom or **L / Space**, and click a picture-in-picture corner to focus that device. The layout is saved across page reloads.
 
+## Quality & performance
+
+Each stream is encoded to match the size it's actually shown at on the receiver: the TV measures every pane (in real device pixels, so a 4K panel asks for 4K-worth and a 1080p panel for 1080p-worth) and the sender encodes exactly that — no pixels wasted, and nothing softer than its pane. A side-by-side pane is encoded at half-width, a focused stream at the full panel resolution (up to its cap). Because the total encoded pixels stay ≈ the panel's pixel count regardless of how many devices are connected, adding senders doesn't blow up encode/decode cost.
+
+The encode cap is the one hardware-dependent knob (VP9 is software-encoded on most machines, so resolution drives CPU). It's controlled by a **quality preset** on the *sender*:
+
+| Preset | Resolution cap | Set via |
+|---|---|---|
+| `performance` | 1080p | `?preset=performance` |
+| `balanced` | 1440p | `?preset=balanced` |
+| `maximum` | 2160p (4K) | `?preset=maximum` |
+
+Append the param to a sender URL (e.g. `…/sender.html?id=device-a&preset=balanced`), or use the **Quality** control on the sender page — both write the same persisted setting. With no choice made, the preset is auto-picked from the machine's CPU core count, so weaker devices don't default to 4K. On top of the preset, the sender watches its encoder's CPU-limitation stats at runtime and **steps the resolution down** automatically if it's struggling (recovering when it eases) — so the preset is a ceiling, not a fixed target, and a busy moment degrades gracefully instead of adding lag.
+
+Press **S** on a sender to toggle a live stats overlay (capture size, actual encoded resolution, framerate, bitrate, and the encoder's quality-limitation reason) — handy for confirming what's really going over the wire.
+
 ## Development
 
 The source is TypeScript under `src/` — `src/server.ts` (Node) and `src/client/` (browser). The build compiles the server to `dist/` and the browser bundles to `public/js/` (both git-ignored).
@@ -56,10 +72,13 @@ pnpm build    # compile server + browser bundles
 pnpm dev      # rebuild + watch sources and restart the server on change
 pnpm lint     # oxlint
 pnpm format   # oxfmt
+pnpm test     # vitest — unit tests for the encoding/preset/SDP logic
 ```
+
+The pure encoding logic (resolution/bitrate math, preset resolution, the auto-adapt ladder, SDP munging) lives in `src/client/rtc-utils.ts` and is covered by `test/`.
 
 ## How it works
 
-The Node.js server handles signaling only — no media passes through it. It listens on both HTTPS (senders) and HTTP (the TV receiver) sharing one WebSocket hub, so an `http`-origin receiver and `https`-origin senders pair up over the same signaling channel. Video and audio then stream directly between sender and receiver via WebRTC (VP9, up to 6 Mbps per sender). Everything stays on the local network.
+The Node.js server handles signaling only — no media passes through it. It listens on both HTTPS (senders) and HTTP (the TV receiver) sharing one WebSocket hub, so an `http`-origin receiver and `https`-origin senders pair up over the same signaling channel. Video and audio then stream directly between sender and receiver via WebRTC (VP9, with the per-stream resolution and bitrate driven by the receiver's measured pane sizes and the sender's quality preset — see [Quality & performance](#quality--performance)). Everything stays on the local network.
 
 The self-signed TLS certificate is generated once on first run and persisted in `.certs/`.

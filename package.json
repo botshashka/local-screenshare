@@ -8,7 +8,8 @@
     "start": "node dist/server.js",
     "dev": "pnpm build && concurrently \"tsc -p tsconfig.server.json --watch\" \"tsc -p tsconfig.browser.json --watch\" \"node --watch dist/server.js\"",
     "lint": "oxlint src",
-    "format": "oxfmt src"
+    "format": "oxfmt src",
+    "test": "vitest run"
   },
   "dependencies": {
     "express": "^4.18.2",
@@ -19,8 +20,10 @@
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.0",
     "concurrently": "^9.0.0",
+    "happy-dom": "^20.10.6",
     "oxfmt": "^0.56.0",
     "oxlint": "^1.71.0",
-    "typescript": "^5.8.0"
+    "typescript": "^5.8.0",
+    "vitest": "^4.1.9"
   }
 }

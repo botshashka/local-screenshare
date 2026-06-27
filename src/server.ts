@@ -16,7 +16,7 @@ interface WsMsg {
   from?: string;
   sdp?: string;
   candidate?: unknown;
-  hint?: string;
+  target?: { w: number; h: number };
 }
 
 const ips: string[] = ["127.0.0.1"];

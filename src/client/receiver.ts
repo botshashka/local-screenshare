@@ -1,4 +1,4 @@
-import { wsUrl, tweakSdp, type DeviceId, type ResHint, type ReceiverInMsg } from "./rtc-utils.js";
+import { wsUrl, tweakSdp, type ResTarget, type ReceiverInMsg } from "./rtc-utils.js";
 
 const LAYOUTS = [
   { cls: "side-by-side", label: "Side by Side" },
@@ -10,17 +10,11 @@ const LAYOUTS = [
 
 type LayoutCls = (typeof LAYOUTS)[number]["cls"];
 
-// solo-a/solo-b use the same hint distribution as pip-a/pip-b
-const FOCUS_A: Record<DeviceId, ResHint> = { "device-a": "full", "device-b": "pip" };
-const FOCUS_B: Record<DeviceId, ResHint> = { "device-a": "pip", "device-b": "full" };
-
-const RES_HINTS: Record<LayoutCls, Record<DeviceId, ResHint>> = {
-  "side-by-side": { "device-a": "side", "device-b": "side" },
-  "pip-a": FOCUS_A,
-  "pip-b": FOCUS_B,
-  "solo-a": FOCUS_A,
-  "solo-b": FOCUS_B,
-};
+// A display:none slot (solo's hidden device) measures 0×0. Keep streaming it at
+// a low-res thumbnail so toggling it back is instant rather than a black frame.
+const MIN_TARGET: ResTarget = { w: 426, h: 240 };
+// .slot has a 0.25s CSS transition; wait it out before measuring final geometry.
+const LAYOUT_SETTLE_MS = 300;
 
 let layoutIdx = Math.max(
   0,
@@ -109,15 +103,34 @@ if (currentLayout) document.body.classList.add(currentLayout.cls);
 
 let ws: WebSocket;
 
+// Measure a slot's on-screen size in device pixels — the resolution the sender
+// should encode to. devicePixelRatio maps CSS px → the panel's real pixels (so
+// a 4K TV asks for 4K-worth, a 1080p TV for 1080p-worth, automatically).
+function targetForSlot(slot: HTMLElement): ResTarget {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = slot.getBoundingClientRect();
+  return {
+    w: Math.max(MIN_TARGET.w, Math.round(rect.width * dpr)),
+    h: Math.max(MIN_TARGET.h, Math.round(rect.height * dpr)),
+  };
+}
+
 function sendResHints(onlyFor?: string): void {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const layout = LAYOUTS[layoutIdx];
-  if (!layout) return;
-  const hints = RES_HINTS[layout.cls];
-  for (const [to, hintVal] of Object.entries(hints)) {
+  for (const [to, slot] of Object.entries(slots)) {
     if (onlyFor && to !== onlyFor) continue;
-    ws.send(JSON.stringify({ type: "res-hint", to, from: "receiver", hint: hintVal }));
+    ws.send(
+      JSON.stringify({ type: "res-hint", to, from: "receiver", target: targetForSlot(slot) }),
+    );
   }
+}
+
+// Layout changes and window resizes animate/resize the slots, so measure once
+// the geometry has settled rather than mid-transition.
+let resHintTimer: ReturnType<typeof setTimeout> | undefined;
+function scheduleResHints(): void {
+  clearTimeout(resHintTimer);
+  resHintTimer = setTimeout(() => sendResHints(), LAYOUT_SETTLE_MS);
 }
 
 function applyLayout(newIdx: number): void {
@@ -133,8 +146,12 @@ function applyLayout(newIdx: number): void {
   localStorage.setItem("showSecondary", String(showSecondary));
   updateLayoutUI();
   updateLegend();
-  sendResHints();
+  scheduleResHints();
 }
+
+// The TV panel is fixed, but a resized browser window (dev/desktop) changes slot
+// sizes — re-measure when it settles.
+window.addEventListener("resize", scheduleResHints);
 
 function cycleLayout(): void {
   applyLayout((layoutIdx + 1) % LAYOUTS.length);
@@ -247,9 +264,11 @@ function createPC(senderId: string): RTCPeerConnection {
       slot.classList.remove("disconnected");
       slot.classList.add("connected");
     };
-    const rvfc = (video as HTMLVideoElement & {
-      requestVideoFrameCallback?: (cb: () => void) => void;
-    }).requestVideoFrameCallback;
+    const rvfc = (
+      video as HTMLVideoElement & {
+        requestVideoFrameCallback?: (cb: () => void) => void;
+      }
+    ).requestVideoFrameCallback;
     if (rvfc) {
       rvfc.call(video, reveal);
     } else {

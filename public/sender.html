@@ -7,60 +7,197 @@
 <link id="favicon" rel="icon">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  /* Shared device palette — mirrors the TV receiver (A = red, B = green) */
+  :root {
+    --c-red: #e5484d;
+    --c-green: #30a46c;
+    --bg: #0f0f0f;
+    --card: #161616;
+    --border: rgba(255, 255, 255, 0.08);
+    --text: #ededed;
+    --muted: #8a8a8a;
+  }
+
   body {
     font-family: system-ui, sans-serif;
-    background: #0f0f0f;
-    color: #eee;
+    background: var(--bg);
+    color: var(--text);
     min-height: 100vh;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 24px;
+    gap: 28px;
     padding: 32px;
   }
-  h1 { font-size: 1.4rem; font-weight: 600; letter-spacing: 0.05em; }
-  .id-badge {
-    background: #1e40af;
-    color: #fff;
-    padding: 4px 14px;
-    border-radius: 999px;
-    font-size: 0.85rem;
+
+  h1 {
+    font-size: 1.15rem;
     font-weight: 600;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: rgba(255, 255, 255, 0.9);
   }
-  .status {
+
+  /* ── Device picker ── */
+  .picker { display: flex; gap: 16px; }
+  .device-btn {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 18px 30px;
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text);
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .device-btn:hover { border-color: rgba(255, 255, 255, 0.22); background: #1c1c1c; }
+  .device-btn .dot { width: 12px; height: 12px; border-radius: 50%; flex: none; }
+  .device-btn.a .dot { background: var(--c-red); }
+  .device-btn.b .dot { background: var(--c-green); }
+
+  /* ── Main card ── */
+  .card {
+    display: none; /* flipped to flex by the script once a device is chosen */
+    flex-direction: column;
+    align-items: center;
+    gap: 22px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 30px 36px;
+    width: min(440px, 92vw);
+  }
+
+  /* Device identity — the TV's per-pane tag (colored dot + name) */
+  .badge {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 18px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border);
     font-size: 0.9rem;
-    color: #888;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+  .badge .dot { width: 11px; height: 11px; border-radius: 50%; flex: none; background: var(--muted); }
+  body.device-a .badge .dot { background: var(--c-red); }
+  body.device-b .badge .dot { background: var(--c-green); }
+
+  /* Status with a state indicator dot (grey → amber → green, like the favicon) */
+  .status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.85rem;
+    color: var(--muted);
     min-height: 1.2em;
-    text-align: center;
+  }
+  .status .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: #6b7280;
+    flex: none;
+    transition: background 0.2s;
   }
   .status.connected { color: #4ade80; }
+  .status.connected .dot { background: #4ade80; }
   .status.error { color: #f87171; }
-  .picker { display: flex; gap: 16px; }
-  button {
+  .status.error .dot { background: #f87171; }
+
+  /* Primary action */
+  .share-btn {
+    width: 100%;
     background: #2563eb;
     color: #fff;
     border: none;
-    border-radius: 10px;
-    padding: 14px 36px;
+    border-radius: 12px;
+    padding: 14px 28px;
     font-size: 1rem;
     font-weight: 600;
     cursor: pointer;
     transition: background 0.15s;
   }
-  button:hover { background: #1d4ed8; }
-  button:disabled { background: #374151; color: #6b7280; cursor: default; }
+  .share-btn:hover:not(:disabled) { background: #1d4ed8; }
+  .share-btn:disabled { background: #262626; color: #666; cursor: default; }
+
+  /* ── Quality segmented control ── */
+  .quality { width: 100%; display: flex; flex-direction: column; gap: 9px; }
+  .quality-label {
+    font-size: 0.72rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+  }
+  .segmented {
+    display: flex;
+    gap: 3px;
+    padding: 3px;
+    background: #0c0c0c;
+    border: 1px solid var(--border);
+    border-radius: 11px;
+  }
+  .segmented button {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    padding: 9px 4px;
+    color: var(--muted);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .segmented button .tier { font-size: 0.8rem; font-weight: 600; }
+  .segmented button .res { font-size: 0.66rem; opacity: 0.65; }
+  .segmented button:hover { color: var(--text); }
+  .segmented button.active { background: rgba(255, 255, 255, 0.1); color: var(--text); }
+
+  /* Preview */
   video {
     width: 100%;
-    max-width: 560px;
-    border-radius: 10px;
-    background: #111;
-    aspect-ratio: 16/9;
+    border-radius: 12px;
+    background: #0a0a0a;
+    aspect-ratio: 16 / 9;
     display: none;
   }
   video.visible { display: block; }
+
+  .hint-key { font-size: 0.68rem; color: #555; letter-spacing: 0.02em; }
+  .hint-key kbd {
+    font-family: ui-monospace, Menlo, monospace;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 4px;
+    padding: 1px 5px;
+    color: #999;
+  }
+
+  /* Live encode stats — toggled with the S key, off by default */
+  .stats {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    background: rgba(0, 0, 0, 0.82);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    font: 0.72rem/1.55 ui-monospace, "SF Mono", Menlo, monospace;
+    color: #bbb;
+    white-space: pre;
+    display: none;
+    z-index: 80;
+    pointer-events: none;
+  }
+  .stats.show { display: block; }
 </style>
 </head>
 <body>
@@ -69,17 +206,30 @@
 
 <div id="pickerScreen">
   <div class="picker">
-    <button id="btnA">I'm Device A</button>
-    <button id="btnB">I'm Device B</button>
+    <button id="btnA" class="device-btn a"><span class="dot"></span>Device A</button>
+    <button id="btnB" class="device-btn b"><span class="dot"></span>Device B</button>
   </div>
 </div>
 
-<div id="mainScreen" style="display:none;flex-direction:column;align-items:center;gap:24px;">
-  <span class="id-badge" id="idBadge">—</span>
-  <div class="status" id="status">Connecting to server…</div>
-  <button id="shareBtn" disabled>Share Screen</button>
+<div id="mainScreen" class="card">
+  <span class="badge"><span class="dot"></span><span id="idBadge">—</span></span>
+  <div class="status" id="status">
+    <span class="dot"></span><span id="statusText">Connecting to server…</span>
+  </div>
+  <button id="shareBtn" class="share-btn" disabled>Share Screen</button>
+  <div class="quality">
+    <span class="quality-label">Quality</span>
+    <div class="segmented" id="qualitySeg" role="group" aria-label="Quality">
+      <button data-preset="performance"><span class="tier">Performance</span><span class="res">1080p</span></button>
+      <button data-preset="balanced"><span class="tier">Balanced</span><span class="res">1440p</span></button>
+      <button data-preset="maximum"><span class="tier">Maximum</span><span class="res">4K</span></button>
+    </div>
+  </div>
   <video id="preview" muted autoplay playsinline></video>
+  <span class="hint-key">Press <kbd>S</kbd> for live stats</span>
 </div>
+
+<div id="stats" class="stats"></div>
 
 <script type="module" src="/js/sender.js"></script>
 </body>
