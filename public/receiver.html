@@ -224,12 +224,30 @@ const pcs = {};
 
 document.body.classList.add(LAYOUTS[layoutIdx].cls);
 
+const RES_HINTS = {
+  'side-by-side': { 'mac-a': 'side', 'mac-b': 'side' },
+  'pip-a':        { 'mac-a': 'full', 'mac-b': 'pip'  },
+  'pip-b':        { 'mac-a': 'pip',  'mac-b': 'full' },
+  'solo-a':       { 'mac-a': 'full', 'mac-b': 'pip'  },
+  'solo-b':       { 'mac-a': 'pip',  'mac-b': 'full' },
+};
+
+function sendResHints(onlyFor) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const hints = RES_HINTS[LAYOUTS[layoutIdx].cls] || { 'mac-a': 'full', 'mac-b': 'full' };
+  for (const [to, hint] of Object.entries(hints)) {
+    if (onlyFor && to !== onlyFor) continue;
+    ws.send(JSON.stringify({ type: 'res-hint', to, from: 'receiver', hint }));
+  }
+}
+
 function cycleLayout() {
   document.body.classList.remove(LAYOUTS[layoutIdx].cls);
   layoutIdx = (layoutIdx + 1) % LAYOUTS.length;
   document.body.classList.add(LAYOUTS[layoutIdx].cls);
   localStorage.setItem('layout', LAYOUTS[layoutIdx].cls);
   updateLayoutUI();
+  sendResHints();
 }
 
 layoutBtn.addEventListener('click', cycleLayout);
@@ -322,6 +340,7 @@ function connectWS() {
 
   ws.onopen = () => {
     ws.send(JSON.stringify({ type: 'register', id: 'receiver' }));
+    sendResHints();
   };
 
   ws.onmessage = async (e) => {
@@ -332,6 +351,7 @@ function connectWS() {
       // Add recvonly transceivers so we're ready for the offer
       pc.addTransceiver('video', { direction: 'recvonly' });
       pc.addTransceiver('audio', { direction: 'recvonly' });
+      sendResHints(msg.id);
     }
 
     if (msg.type === 'offer') {

@@ -121,6 +121,27 @@ function startSender(id) {
   let ws = null;
   let stream = null;
   let receiverReady = false;
+  let currentHint = 'full';
+
+  const TIERS = {
+    full: { scaleResolutionDownBy: 1, maxBitrate: 6_000_000 },
+    side: { scaleResolutionDownBy: 1, maxBitrate: 3_000_000 },
+    pip:  { scaleResolutionDownBy: 2, maxBitrate:   500_000 },
+  };
+
+  async function applyHint(hint) {
+    currentHint = hint;
+    if (!pc || pc.connectionState !== 'connected') return;
+    const tier = TIERS[hint] || TIERS.full;
+    for (const sender of pc.getSenders()) {
+      if (sender.track?.kind !== 'video') continue;
+      const params = sender.getParameters();
+      if (!params.encodings.length) params.encodings = [{}];
+      params.encodings[0].maxBitrate = tier.maxBitrate;
+      params.encodings[0].scaleResolutionDownBy = tier.scaleResolutionDownBy;
+      await sender.setParameters(params).catch(() => {});
+    }
+  }
 
   const statusEl = document.getElementById('status');
   const shareBtn = document.getElementById('shareBtn');
@@ -144,12 +165,15 @@ function startSender(id) {
     pc.onconnectionstatechange = async () => {
       if (pc.connectionState === 'connected') {
         setStatus('Streaming to TV', 'connected');
+        const tier = TIERS[currentHint] || TIERS.full;
         for (const sender of pc.getSenders()) {
           if (sender.track?.kind !== 'video') continue;
           const params = sender.getParameters();
           if (!params.encodings.length) params.encodings = [{}];
           params.encodings[0].networkPriority = 'high';
           params.encodings[0].priority = 'high';
+          params.encodings[0].maxBitrate = tier.maxBitrate;
+          params.encodings[0].scaleResolutionDownBy = tier.scaleResolutionDownBy;
           await sender.setParameters(params).catch(() => {});
         }
       }
@@ -195,6 +219,9 @@ function startSender(id) {
       }
       if (msg.type === 'request-reoffers' && stream) {
         await makeOffer();
+      }
+      if (msg.type === 'res-hint') {
+        await applyHint(msg.hint);
       }
     };
 
