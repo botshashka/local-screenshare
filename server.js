@@ -56,10 +56,10 @@ wss.on('connection', (ws) => {
       console.log(`[+] ${clientId}`);
 
       if (clientId === 'receiver') {
-        for (const id of ['mac-a', 'mac-b']) {
+        for (const id of ['device-a', 'device-b']) {
           if (clients.has(id)) send(clients.get(id), { type: 'receiver-ready' });
         }
-        for (const id of ['mac-a', 'mac-b']) {
+        for (const id of ['device-a', 'device-b']) {
           if (clients.has(id)) send(ws, { type: 'sender-connected', id });
         }
       } else {
@@ -82,7 +82,7 @@ wss.on('connection', (ws) => {
     console.log(`[-] ${clientId}`);
 
     if (clientId === 'receiver') {
-      for (const id of ['mac-a', 'mac-b']) {
+      for (const id of ['device-a', 'device-b']) {
         if (clients.has(id)) send(clients.get(id), { type: 'peer-disconnected', id: 'receiver' });
       }
     } else {
@@ -97,8 +97,8 @@ const PORT = process.env.PORT || 4242;
 server.listen(PORT, '0.0.0.0', () => {
   const lanIp = ips.find(ip => ip !== '127.0.0.1') || 'localhost';
   console.log(`\nScreenshare running on https://${lanIp}:${PORT}`);
-  console.log(`\n  Mac A:   https://${lanIp}:${PORT}/sender.html?id=mac-a`);
-  console.log(`  Mac B:   https://${lanIp}:${PORT}/sender.html?id=mac-b`);
+  console.log(`\n  Device A:   https://${lanIp}:${PORT}/sender.html?id=device-a`);
+  console.log(`  Device B:   https://${lanIp}:${PORT}/sender.html?id=device-b`);
   console.log(`  TV:      https://${lanIp}:${PORT}/receiver.html`);
   console.log(`\n  ⚠  Click "Advanced" → "Proceed" on each device to bypass the self-signed cert warning.\n`);
 });

@@ -152,14 +152,14 @@
     <video id="videoA" autoplay playsinline></video>
     <div class="overlay">
       <div class="dot"></div>
-      <span>Waiting for Mac A…</span>
+      <span>Waiting for Device A…</span>
     </div>
   </div>
   <div class="slot disconnected" id="slotB">
     <video id="videoB" autoplay playsinline></video>
     <div class="overlay">
       <div class="dot"></div>
-      <span>Waiting for Mac B…</span>
+      <span>Waiting for Device B…</span>
     </div>
   </div>
 </div>
@@ -196,10 +196,10 @@ const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hos
 
 const LAYOUTS = [
   { cls: 'side-by-side', label: 'Side by Side' },
-  { cls: 'pip-a',        label: 'Mac A Focus' },
-  { cls: 'pip-b',        label: 'Mac B Focus' },
-  { cls: 'solo-a',       label: 'Mac A Only' },
-  { cls: 'solo-b',       label: 'Mac B Only' },
+  { cls: 'pip-a',        label: 'Device A Focus' },
+  { cls: 'pip-b',        label: 'Device B Focus' },
+  { cls: 'solo-a',       label: 'Device A Only' },
+  { cls: 'solo-b',       label: 'Device B Only' },
 ];
 let layoutIdx = Math.max(0, LAYOUTS.findIndex(l => l.cls === localStorage.getItem('layout')));
 
@@ -216,8 +216,8 @@ function updateLayoutUI() {
 }
 updateLayoutUI();
 
-const slots = { 'mac-a': document.getElementById('slotA'), 'mac-b': document.getElementById('slotB') };
-const videos = { 'mac-a': document.getElementById('videoA'), 'mac-b': document.getElementById('videoB') };
+const slots = { 'device-a': document.getElementById('slotA'), 'device-b': document.getElementById('slotB') };
+const videos = { 'device-a': document.getElementById('videoA'), 'device-b': document.getElementById('videoB') };
 
 // Peer connections
 const pcs = {};
@@ -225,16 +225,16 @@ const pcs = {};
 document.body.classList.add(LAYOUTS[layoutIdx].cls);
 
 const RES_HINTS = {
-  'side-by-side': { 'mac-a': 'side', 'mac-b': 'side' },
-  'pip-a':        { 'mac-a': 'full', 'mac-b': 'pip'  },
-  'pip-b':        { 'mac-a': 'pip',  'mac-b': 'full' },
-  'solo-a':       { 'mac-a': 'full', 'mac-b': 'pip'  },
-  'solo-b':       { 'mac-a': 'pip',  'mac-b': 'full' },
+  'side-by-side': { 'device-a': 'side', 'device-b': 'side' },
+  'pip-a':        { 'device-a': 'full', 'device-b': 'pip'  },
+  'pip-b':        { 'device-a': 'pip',  'device-b': 'full' },
+  'solo-a':       { 'device-a': 'full', 'device-b': 'pip'  },
+  'solo-b':       { 'device-a': 'pip',  'device-b': 'full' },
 };
 
 function sendResHints(onlyFor) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const hints = RES_HINTS[LAYOUTS[layoutIdx].cls] || { 'mac-a': 'full', 'mac-b': 'full' };
+  const hints = RES_HINTS[LAYOUTS[layoutIdx].cls] || { 'device-a': 'full', 'device-b': 'full' };
   for (const [to, hintVal] of Object.entries(hints)) {
     if (onlyFor && to !== onlyFor) continue;
     ws.send(JSON.stringify({ type: 'res-hint', to, from: 'receiver', hint: hintVal }));
