@@ -4,6 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Screenshare Receiver</title>
+<!-- Signaling hub host. Preferred: set it at deploy time via the SIGNALING_HUB
+     env var (baked into the gitignored js/config.js by `pnpm build`), so the
+     host isn't committed. This <meta> is a no-build alternative — fill in
+     content="signaling.example.com". Both empty ⇒ this page's own origin (local
+     server.ts / offline LAN). See the README. -->
+<meta name="signaling-hub" content="">
+<script src="/js/config.js"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -66,6 +73,36 @@
   }
   .slot.connected .overlay { display: none; }
   .slot.disconnected .overlay { display: flex; }
+
+  /* ── Per-slot join prompt (QR + code) ──
+     Shown in an empty pane once the other device is already streaming, so a
+     second person can scan to join even though the big room card is gone. Shown
+     in every empty pane that's large enough to read — side-by-side, solo
+     (fullscreen), and the big focused pane of a Focus layout — and replaces the
+     waiting ring there. Hidden only in the tiny PiP corner, which keeps the ring.
+     Gated on a configured hub (rooms only exist then). */
+  .slot-join { display: none; flex-direction: column; align-items: center; gap: 12px; }
+  body.hub .slot.disconnected .slot-join { display: flex; }
+  body.hub .slot.disconnected .overlay .ring { display: none; }
+  /* The PiP corner (non-focused pane in a Focus layout): too small for a QR. */
+  body.hub.pip-a #slotB .slot-join,
+  body.hub.pip-b #slotA .slot-join { display: none; }
+  body.hub.pip-a #slotB .overlay .ring,
+  body.hub.pip-b #slotA .overlay .ring { display: block; }
+  .slot-qr {
+    width: 132px;
+    height: 132px;
+    border-radius: 8px;
+    background: #fff;
+    padding: 7px;
+    image-rendering: pixelated;
+  }
+  .slot-join-text { color: #888; font-size: 0.82rem; }
+  .slot-join-text .slot-domain,
+  .slot-join-text .slot-code {
+    color: #cfcfcf;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
 
   /* ── Per-device name tag (shown under each pane in side-by-side) ── */
   .slot .tag {
@@ -226,16 +263,126 @@
   #legend .pill[data-color="blue"] .dot { background: var(--c-blue); }
   #legend .pill.active { color: #fff; background: rgba(255,255,255,0.18); }
   #legend .pill.dim { opacity: 0.4; }
+
+  /* ── Room join panel (code + QR), shown until a device is streaming ── */
+  #roomPanel {
+    position: fixed;
+    inset: 0;
+    z-index: 150;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    transition: opacity 0.3s;
+  }
+  #roomPanel.hidden { opacity: 0; visibility: hidden; }
+  /* The TV-viewing chrome (stage, controls, legend, hint) is wrapped in #tvView;
+     while the join card is up, one toggle hides all of it. visibility (not
+     display) keeps slots sized and video decoding so the first-frame reveal
+     still fires; anything added inside #tvView later is hidden automatically. */
+  #tvView { position: fixed; inset: 0; }
+  body.joining #tvView { visibility: hidden; }
+  .room-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    padding: 26px 32px;
+    background: rgba(18,18,18,0.94);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 20px;
+    font-family: system-ui, sans-serif;
+  }
+  .room-title { font-size: 1.05rem; font-weight: 600; color: rgba(255,255,255,0.88); }
+  .room-qr {
+    width: 168px;
+    height: 168px;
+    border-radius: 10px;
+    background: #fff;
+    padding: 8px;
+    image-rendering: pixelated;
+  }
+  .room-howto { font-size: 0.85rem; color: #9a9a9a; text-align: center; max-width: 320px; }
+  .room-domain {
+    color: #e8e8e8;
+    font-weight: 600;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .room-code {
+    font: 700 2.2rem/1 ui-monospace, "SF Mono", Menlo, monospace;
+    letter-spacing: 0.2em;
+    padding-left: 0.2em;   /* offset the trailing letter-spacing so it reads centered */
+    color: #fff;
+  }
+  .room-or {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    color: #666;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+  }
+  .room-or::before, .room-or::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: rgba(255,255,255,0.12);
+  }
+  .room-join-label { font-size: 0.8rem; color: #9a9a9a; text-align: center; max-width: 300px; }
+  .room-join-label em { color: #cfcfcf; font-style: italic; }
+  /* The panel is pointer-events:none so it never blocks the TV; re-enable the
+     interactive join controls. */
+  .room-join { display: flex; gap: 8px; pointer-events: auto; }
+  .room-join-input {
+    width: 150px;
+    text-align: center;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    font: 600 1rem/1 ui-monospace, "SF Mono", Menlo, monospace;
+    background: #0c0c0c;
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 10px;
+    padding: 11px 12px;
+    color: #fff;
+  }
+  .room-join-input:focus { outline: 2px solid #2563eb; }
+  .room-join-btn {
+    background: #2563eb;
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    padding: 11px 20px;
+    font-size: 0.92rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .room-join-btn:hover { background: #1d4ed8; }
+  .room-join-error { font-size: 0.78rem; color: #f87171; min-height: 1em; text-align: center; max-width: 300px; }
 </style>
 </head>
-<body>
+<!-- Start hidden (joining) and with the room card hidden, so the very first
+     paint is just black — JS then reveals the right view once it knows whether a
+     hub is configured and has populated the card. Avoids a flash of the empty
+     stage / unpopulated card before the module runs. -->
+<body class="joining">
 
+<!-- All TV-viewing chrome lives in one wrapper, so the join screen hides it with
+     a single toggle (body.joining) instead of per-element rules. Full-viewport so
+     #stage's height:100% still resolves. -->
+<div id="tvView">
 <div id="stage">
   <div class="slot disconnected" id="slotA">
     <video id="videoA" autoplay playsinline></video>
     <div class="overlay">
       <div class="ring"></div>
       <span>Waiting for Device A…</span>
+      <div class="slot-join">
+        <img class="slot-qr" alt="Join QR code">
+        <div class="slot-join-text">Scan, or open <span class="slot-domain"></span> · code <span class="slot-code"></span></div>
+      </div>
     </div>
     <div class="tag"><span class="dot"></span>Device A</div>
   </div>
@@ -244,6 +391,10 @@
     <div class="overlay">
       <div class="ring"></div>
       <span>Waiting for Device B…</span>
+      <div class="slot-join">
+        <img class="slot-qr" alt="Join QR code">
+        <div class="slot-join-text">Scan, or open <span class="slot-domain"></span> · code <span class="slot-code"></span></div>
+      </div>
     </div>
     <div class="tag"><span class="dot"></span>Device B</div>
   </div>
@@ -262,7 +413,28 @@
   <span class="pill" data-color="blue"><span class="dot"></span><span id="blueLabel">Hide Device B</span></span>
 </div>
 <div id="hint">L / Space cycles layouts — or use the colored remote buttons</div>
+</div><!-- /tvView -->
 
+<div id="roomPanel" class="hidden">
+  <div class="room-card">
+    <div class="room-title">Share a screen here</div>
+    <img id="roomQr" class="room-qr" alt="Join QR code">
+    <div class="room-howto">Scan, or open <span id="roomDomain" class="room-domain"></span> and enter</div>
+    <div id="roomCode" class="room-code">—</div>
+    <div class="room-or"><span>or</span></div>
+    <div class="room-join-label">Share <em>this</em> device’s screen to another display — enter its code:</div>
+    <form id="joinForm" class="room-join" autocomplete="off">
+      <input id="roomJoinInput" class="room-join-input" type="text" inputmode="text"
+             autocapitalize="characters" spellcheck="false" maxlength="8" placeholder="ABCD2345"
+             aria-label="Code of the screen to share to">
+      <button id="roomJoinBtn" class="room-join-btn" type="submit">Join</button>
+    </form>
+    <div id="roomJoinError" class="room-join-error"></div>
+  </div>
+</div>
+
+<!-- Classic script (not a module) so it sets a global `qrcode` the module reads. -->
+<script src="/vendor/qrcode.js"></script>
 <script type="module" src="/js/receiver.js"></script>
 </body>
 </html>

@@ -1,0 +1,16 @@
+{
+  "name": "screenshare-signaling",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cloudflare Worker + Durable Object signaling hub for screenshare",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241022.0",
+    "typescript": "^5.8.0",
+    "wrangler": "^4.0.0"
+  }
+}

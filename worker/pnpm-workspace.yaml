@@ -1,0 +1,6 @@
+# wrangler's native deps need their build scripts to run: workerd is the local
+# runtime for `wrangler dev`, esbuild bundles the Worker. sharp is unused.
+allowBuilds:
+  esbuild: true
+  sharp: false
+  workerd: true

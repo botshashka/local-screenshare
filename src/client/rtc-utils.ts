@@ -1,9 +1,171 @@
-export const STUN: RTCConfiguration = { iceServers: [] };
+// STUN lets ICE gather server-reflexive candidates so the handshake works when
+// the static pages are served from a remote origin rather than the LAN itself.
+// We run *no* TURN by design: same-LAN peers connect directly via host/mDNS
+// candidates and media never leaves the network — a relay-hostile network simply
+// fails to connect rather than routing video through the cloud. (Two public STUN
+// servers for redundancy; swap in your own if you prefer not to depend on them.)
+export const STUN: RTCConfiguration = {
+  iceServers: [{ urls: "stun:stun.l.google.com:19302" }, { urls: "stun:stun1.l.google.com:19302" }],
+};
 
 export const SENDER_IDS = ["device-a", "device-b"] as const;
 export type DeviceId = (typeof SENDER_IDS)[number];
 
-export const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}`;
+export function isDeviceId(id: string | null | undefined): id is DeviceId {
+  return id != null && (SENDER_IDS as readonly string[]).includes(id);
+}
+
+// ── Signaling endpoint resolution ──────────────────────────────────────────
+// The static client may be served from a different origin than the signaling
+// hub (e.g. the pages on a static host/CDN, the hub on a separate box or a
+// serverless function). Resolve the hub host with precedence:
+//   ?hub= query param  >  window.__SIGNALING_HUB__  >  <meta>  >  the page's origin.
+// __SIGNALING_HUB__ is baked at build time from the SIGNALING_HUB env var (see
+// scripts/inject-hub.mjs) so a deploy can set the host without committing it; the
+// <meta> is a no-build alternative; the same-origin fallback keeps the local
+// `server.ts` (LAN / offline) working unchanged with nothing configured.
+export function signalingHost(): string | null {
+  const fromParam = new URLSearchParams(location.search).get("hub");
+  if (fromParam && fromParam.trim()) return fromParam.trim();
+  const injected = (globalThis as { __SIGNALING_HUB__?: unknown }).__SIGNALING_HUB__;
+  if (typeof injected === "string" && injected.trim()) return injected.trim();
+  const meta = document.querySelector('meta[name="signaling-hub"]')?.getAttribute("content");
+  if (meta && meta.trim()) return meta.trim();
+  return null;
+}
+
+// Build the signaling WebSocket URL for a room. A configured hub is assumed to
+// be TLS (wss) unless it carries an explicit ws/http scheme or is a localhost
+// host (local dev); the same-origin fallback mirrors the page's own protocol.
+// `host` is injectable for testing.
+export function signalingUrl(roomId: string, host: string | null = signalingHost()): string {
+  const query = `?room=${encodeURIComponent(roomId)}`;
+  if (!host) {
+    const scheme = location.protocol === "https:" ? "wss" : "ws";
+    return `${scheme}://${location.host}/ws${query}`;
+  }
+  let scheme = "wss";
+  let bare = host;
+  const withScheme = host.match(/^(wss?|https?):\/\/(.+)$/i);
+  if (withScheme) {
+    const proto = withScheme[1]!.toLowerCase();
+    scheme = proto === "http" || proto === "ws" ? "ws" : "wss";
+    bare = withScheme[2]!;
+  } else if (/^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(:\d+)?$/.test(host)) {
+    scheme = "ws";
+  }
+  bare = bare.replace(/\/+$/, "");
+  return `${scheme}://${bare}/ws${query}`;
+}
+
+// ── Liveness heartbeat ───────────────────────────────────────────────────────
+// Both clients send `{type:"ping"}` on this interval; the hub replies `{pong}`
+// and reaps any socket silent past the timeout (freeing its sender slot). An
+// *application*-level heartbeat is deliberate: a half-open or backgrounded tab
+// still answers protocol-level pings at the network layer, so only a message the
+// page itself sends proves its JS is alive. Mirrors HB_* in src/hub.ts and the
+// Worker. The timeout is 3× the interval so a single dropped ping is harmless.
+export const HB_INTERVAL_MS = 10_000;
+export const HB_TIMEOUT_MS = 30_000;
+
+// Drive a socket's heartbeat. Sends a ping each interval and, if nothing has
+// arrived from the server within the timeout, treats the socket as half-open and
+// invokes onStale (the caller drops it and reconnects, rather than waiting on a
+// close event that a dead connection may never deliver). Call alive() from the
+// socket's onmessage and stop() from its onclose.
+export function startHeartbeat(
+  ws: Pick<WebSocket, "send" | "close">,
+  onStale: () => void,
+): { alive: () => void; stop: () => void } {
+  let lastSeen = Date.now();
+  let stopped = false;
+  const stop = (): void => {
+    stopped = true;
+    clearInterval(timer);
+  };
+  const timer = setInterval(() => {
+    if (stopped) return;
+    if (Date.now() - lastSeen > HB_TIMEOUT_MS) {
+      stop();
+      onStale();
+      return;
+    }
+    try {
+      ws.send(JSON.stringify({ type: "ping" }));
+    } catch {
+      // socket already closing — onclose will stop us
+    }
+  }, HB_INTERVAL_MS);
+  return {
+    alive: () => {
+      lastSeen = Date.now();
+    },
+    stop,
+  };
+}
+
+// ── Room codes ─────────────────────────────────────────────────────────────
+// A public hub is multi-tenant: one signaling room per code keeps each
+// household's signaling isolated, so the code is also the only access gate —
+// hence high entropy and an unambiguous alphabet (no 0/1/I/L/O) for codes that
+// are scanned via QR but can also be read off a TV and typed without confusion.
+export const ROOM_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+const ROOM_LEN = 8;
+// Validation length is tied to the generated length: every real code is exactly
+// ROOM_LEN chars, so accepting any other length just invites typos. (The Worker
+// keeps a copy of this pattern — see test/signaling.test.ts for the drift guard.)
+const ROOM_RE = new RegExp(`^[${ROOM_ALPHABET}]{${ROOM_LEN}}$`);
+
+export function normalizeRoomCode(code: string): string {
+  return code.trim().toUpperCase();
+}
+
+export function isValidRoomCode(code: string | null | undefined): code is string {
+  return code != null && ROOM_RE.test(normalizeRoomCode(code));
+}
+
+// Normalize a candidate to a valid room code, or null if it isn't one — lets
+// callers resolve a code with a flat `coerceRoomCode(a) ?? coerceRoomCode(b)`.
+export function coerceRoomCode(code: string | null | undefined): string | null {
+  return isValidRoomCode(code) ? normalizeRoomCode(code) : null;
+}
+
+// Reflect the active room into the page URL (replacing, not pushing) so a reload
+// or a copied address keeps it. No-op if it's already there.
+export function persistRoomInUrl(room: string): void {
+  const url = new URL(location.href);
+  if (url.searchParams.get("room") === room) return;
+  url.searchParams.set("room", room);
+  history.replaceState(null, "", url);
+}
+
+// ~40 bits of entropy. The modulo over a 31-char alphabet adds negligible bias
+// for an access code of this size.
+export function generateRoomCode(): string {
+  const bytes = new Uint8Array(ROOM_LEN);
+  crypto.getRandomValues(bytes);
+  let out = "";
+  for (const b of bytes) out += ROOM_ALPHABET[b % ROOM_ALPHABET.length];
+  return out;
+}
+
+// ── Per-tab identity token ──────────────────────────────────────────────────
+// A stable random token identifying this tab to the hub, so a sender reconnect
+// can reclaim *its own* slot from a half-open ghost while a different live
+// device that also prefers that slot is left alone (the hub compares tokens —
+// see the claim rule in src/hub.ts / the Worker). Persisted in sessionStorage
+// so it survives a reload but is per-tab: reopening in a new tab gets a fresh
+// token and so never bumps another live device. getRandomValues (not
+// randomUUID, which needs a secure context) keeps it usable on any origin.
+export function clientToken(storage: Storage, key = "clientToken"): string {
+  const existing = storage.getItem(key);
+  if (existing) return existing;
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  const token = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  storage.setItem(key, token);
+  return token;
+}
 
 // Target on-screen size of a stream's pane, in device pixels — the receiver
 // measures its slots and sends this; the sender encodes to match (never
@@ -13,6 +175,11 @@ export const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${locat
 export type ResTarget = { w: number; h: number };
 
 export type SenderInMsg =
+  // The hub assigns a free slot (device-a/device-b) by arrival order; a sender
+  // learns its identity from this rather than choosing one. `room-full` means
+  // both slots are already held by live senders.
+  | { type: "assigned"; id: DeviceId }
+  | { type: "room-full" }
   | { type: "receiver-ready" }
   | { type: "answer"; sdp: string }
   | { type: "ice-candidate"; candidate: RTCIceCandidateInit }

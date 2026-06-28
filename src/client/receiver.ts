@@ -1,4 +1,26 @@
-import { wsUrl, tweakSdp, type ResTarget, type ReceiverInMsg } from "./rtc-utils.js";
+import {
+  STUN,
+  signalingHost,
+  signalingUrl,
+  generateRoomCode,
+  coerceRoomCode,
+  persistRoomInUrl,
+  tweakSdp,
+  startHeartbeat,
+  type ResTarget,
+  type ReceiverInMsg,
+} from "./rtc-utils.js";
+
+// Vendored QR encoder (public/vendor/qrcode.js), loaded as a classic script
+// before this module so it's a global. Typed minimally for the bits we use.
+declare const qrcode: (
+  typeNumber: number,
+  errorCorrectionLevel: string,
+) => {
+  addData(data: string): void;
+  make(): void;
+  createDataURL(cellSize?: number, margin?: number): string;
+};
 
 const LAYOUTS = [
   { cls: "side-by-side", label: "Side by Side" },
@@ -98,6 +120,147 @@ const videos: Record<string, HTMLVideoElement> = {
 const pcs: Record<string, RTCPeerConnection> = {};
 const retryTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 
+// ── Room ─────────────────────────────────────────────────────────────────────
+// Rooms exist only to isolate tenants on a shared public hub. A co-located
+// `server.ts` is a single global hub with nothing to isolate, so the whole room
+// feature (code + QR panel here, join code on the sender) is active only when a
+// hub is configured. With none, this stays empty and the panel is hidden — the
+// local `pnpm start` flow is unchanged.
+const params = new URLSearchParams(location.search);
+const hubConfigured = signalingHost() !== null;
+// Gates the per-slot join prompt CSS (only meaningful when rooms exist).
+if (hubConfigured) document.body.classList.add("hub");
+const roomPanel = document.getElementById("roomPanel") as HTMLElement | null;
+
+// The TV owns the room: a code from ?room= (or a previously generated one in
+// localStorage) is reused so reloads keep the same room and senders stay paired;
+// otherwise we mint a fresh unguessable code. It's persisted and reflected into
+// the URL, then shown on screen as a number + QR for senders to scan/open.
+let room = "";
+if (hubConfigured) {
+  room =
+    coerceRoomCode(params.get("room")) ??
+    coerceRoomCode(localStorage.getItem("room")) ??
+    generateRoomCode();
+  localStorage.setItem("room", room);
+  persistRoomInUrl(room);
+  renderRoomPanel();
+}
+
+function renderRoomPanel(): void {
+  const codeEl = document.getElementById("roomCode");
+  if (codeEl) codeEl.textContent = room;
+  // What to type manually: just the bare domain (the root lands on this screen),
+  // not the full sender URL — the QR carries the full link for scanning.
+  const domainEl = document.getElementById("roomDomain");
+  if (domainEl) domainEl.textContent = location.host;
+  // Carry an explicit ?hub= through so a join opened from a local-dev receiver
+  // targets the same hub the receiver is using.
+  const joinUrl = new URL("sender.html", location.href);
+  joinUrl.searchParams.set("room", room);
+  const hub = params.get("hub");
+  if (hub) joinUrl.searchParams.set("hub", hub);
+  let qrDataUrl = "";
+  if (typeof qrcode === "function") {
+    const qr = qrcode(0, "M");
+    qr.addData(joinUrl.toString());
+    qr.make();
+    qrDataUrl = qr.createDataURL(6, 8);
+  }
+  const img = document.getElementById("roomQr") as HTMLImageElement | null;
+  if (img && qrDataUrl) img.src = qrDataUrl;
+
+  // Mirror the same QR / domain / code into each empty-slot join prompt, so a
+  // second sender can still scan in after the big room card has gone away.
+  document.querySelectorAll<HTMLImageElement>(".slot-qr").forEach((el) => {
+    if (qrDataUrl) el.src = qrDataUrl;
+  });
+  document.querySelectorAll(".slot-domain").forEach((el) => {
+    el.textContent = location.host;
+  });
+  document.querySelectorAll(".slot-code").forEach((el) => {
+    el.textContent = room;
+  });
+  // Join form: become a sender to *another* screen by typing the code shown on
+  // it. Opening the root on a phone mints a throwaway room for this device; this
+  // navigates away to the real session (abandoning that throwaway room, which
+  // empties the moment this socket closes). Guard against typing this very
+  // screen's own code — the confusion case — which would just pair the device
+  // with its own throwaway room.
+  const joinForm = document.getElementById("joinForm") as HTMLFormElement | null;
+  const joinInput = document.getElementById("roomJoinInput") as HTMLInputElement | null;
+  const joinErr = document.getElementById("roomJoinError");
+  if (joinForm && joinInput) {
+    joinForm.onsubmit = (e) => {
+      e.preventDefault();
+      const code = coerceRoomCode(joinInput.value);
+      if (!code) {
+        if (joinErr) joinErr.textContent = "Enter the 8-character code shown on the other screen.";
+        return;
+      }
+      if (code === room) {
+        if (joinErr)
+          joinErr.textContent =
+            "That’s this screen’s own code — enter the code from the screen you want to share to.";
+        return;
+      }
+      const target = new URL("sender.html", location.href);
+      target.searchParams.set("room", code);
+      const hub = params.get("hub");
+      if (hub) target.searchParams.set("hub", hub);
+      location.href = target.toString();
+    };
+  }
+}
+
+// Show the join panel only while nothing is on screen — once any device is
+// streaming it gets out of the way, and it returns when all disconnect. With no
+// hub configured (local single-hub server) there are no rooms, so it stays gone.
+//
+// Revealing the card the instant nothing is connected flashes it during the gap
+// between this view loading (or a sender reloading) and the stream coming up — a
+// sender already in the room re-pairs within ~a second. So defer *showing* the
+// card by a short grace window: if a device connects first, the card never
+// appears. Hiding it once connected is always immediate.
+const ROOM_PANEL_GRACE_MS = 1500;
+let roomPanelGraceTimer: ReturnType<typeof setTimeout> | undefined;
+
+// `joining` hides all TV-viewing chrome (#tvView) so the card sits on a clean
+// full screen, not over empty "waiting" placeholders; the card itself toggles in
+// tandem. The page's first paint is already this state (body `joining`, card
+// `hidden`), so the grace wait below shows nothing new.
+function showRoomPanel(show: boolean): void {
+  if (!roomPanel) return;
+  roomPanel.classList.toggle("hidden", !show);
+  document.body.classList.toggle("joining", show);
+}
+
+function updateRoomPanel(): void {
+  if (!roomPanel) return;
+  clearTimeout(roomPanelGraceTimer);
+  roomPanelGraceTimer = undefined;
+  if (!hubConfigured) {
+    // Local single-hub server: no join screen. Keep the card hidden and reveal
+    // the TV chrome (body starts in `joining` to avoid a first-paint flash).
+    showRoomPanel(false);
+    return;
+  }
+  const anyConnected = Object.values(slots).some((s) => s.classList.contains("connected"));
+  if (anyConnected) {
+    showRoomPanel(false);
+    return;
+  }
+  // Nothing connected — wait out the grace window before revealing the card, in
+  // case a device is mid-(re)connect. Re-check on fire, since a connection may
+  // have landed during the wait.
+  roomPanelGraceTimer = setTimeout(() => {
+    roomPanelGraceTimer = undefined;
+    const stillNone = !Object.values(slots).some((s) => s.classList.contains("connected"));
+    if (stillNone) showRoomPanel(true);
+  }, ROOM_PANEL_GRACE_MS);
+}
+updateRoomPanel();
+
 const currentLayout = LAYOUTS[layoutIdx];
 if (currentLayout) document.body.classList.add(currentLayout.cls);
 
@@ -189,6 +352,7 @@ function markDisconnected(id: string): void {
   }
   const video = videos[id];
   if (video) video.srcObject = null;
+  updateRoomPanel();
 }
 
 layoutBtn?.addEventListener("click", cycleLayout);
@@ -204,6 +368,9 @@ const REMOTE_ACTIONS = [
 ] as const;
 
 document.addEventListener("keydown", (e) => {
+  // While the join popup is up it covers the screen and there's nothing to lay
+  // out, so don't claim the remote hotkeys — let keys reach the code input.
+  if (roomPanel && !roomPanel.classList.contains("hidden")) return;
   if (e.key === "l" || e.key === "L" || e.key === " ") {
     e.preventDefault();
     cycleLayout();
@@ -246,7 +413,7 @@ setTimeout(() => {
 function createPC(senderId: string): RTCPeerConnection {
   pcs[senderId]?.close();
 
-  const pc = new RTCPeerConnection({ iceServers: [] });
+  const pc = new RTCPeerConnection(STUN);
   pcs[senderId] = pc;
 
   pc.ontrack = (e) => {
@@ -263,6 +430,7 @@ function createPC(senderId: string): RTCPeerConnection {
     const reveal = () => {
       slot.classList.remove("disconnected");
       slot.classList.add("connected");
+      updateRoomPanel();
     };
     const rvfc = (
       video as HTMLVideoElement & {
@@ -309,13 +477,28 @@ function createPC(senderId: string): RTCPeerConnection {
 // Signaling doesn't depend on UI init: the DOM lookups above are guarded so
 // module init always reaches this call and the socket always opens.
 function connectWS(): void {
-  ws = new WebSocket(wsUrl);
+  ws = new WebSocket(signalingUrl(room));
+  const sock = ws;
+
+  // Keep the receiver's slot from being reaped as a ghost while it sits idle
+  // between layout changes, and detect a half-open socket so it reconnects
+  // instead of leaving senders paired to a dead TV.
+  const hb = startHeartbeat(sock, () => {
+    sock.onclose = null;
+    try {
+      sock.close();
+    } catch {
+      // ignore
+    }
+    if (ws === sock) connectWS();
+  });
 
   ws.onopen = () => {
     ws.send(JSON.stringify({ type: "register", id: "receiver" }));
   };
 
   ws.onmessage = async (e: MessageEvent<string>) => {
+    hb.alive();
     let msg: ReceiverInMsg;
     try {
       msg = JSON.parse(e.data) as ReceiverInMsg;
@@ -363,7 +546,10 @@ function connectWS(): void {
     }
   };
 
-  ws.onclose = () => setTimeout(connectWS, 3000);
+  ws.onclose = () => {
+    hb.stop();
+    setTimeout(connectWS, 3000);
+  };
 }
 
 connectWS();

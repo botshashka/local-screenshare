@@ -1,0 +1,4 @@
+# Cloudflare Pages: serve the receiver (TV) view at the root URL, so opening the
+# bare domain lands on the QR/join screen. Exact-match on "/" only — every other
+# path (sender.html, /js/*, /vendor/*) serves its own file normally.
+/    /receiver.html    200

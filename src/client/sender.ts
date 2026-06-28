@@ -1,5 +1,10 @@
 import {
-  wsUrl,
+  STUN,
+  signalingHost,
+  signalingUrl,
+  clientToken,
+  coerceRoomCode,
+  persistRoomInUrl,
   tweakSdp,
   PRESETS,
   HEIGHT_LADDER,
@@ -7,10 +12,23 @@ import {
   resolvePresetName,
   computeEncoding,
   adaptStep,
+  isDeviceId,
+  startHeartbeat,
+  type DeviceId,
   type QualityPreset,
   type ResTarget,
   type SenderInMsg,
 } from "./rtc-utils.js";
+
+// The room code this sender pairs through. Set during room resolution at the
+// bottom of the module before startSender() runs.
+let room = "";
+
+// An optional slot hint from ?id=device-a/-b. The hub still owns assignment —
+// this is only honored when that slot is free, so it can't steal an in-use one.
+const preferId: DeviceId | null = isDeviceId(new URLSearchParams(location.search).get("id"))
+  ? (new URLSearchParams(location.search).get("id") as DeviceId)
+  : null;
 
 type StatusClass = "" | "connected" | "error";
 
@@ -67,23 +85,16 @@ function setFavicon(color: FaviconColor): void {
   link.href = dataUrl;
 }
 
-function init(id: string): void {
-  (document.getElementById("pickerScreen") as HTMLElement).style.display = "none";
-  const main = document.getElementById("mainScreen") as HTMLElement;
-  main.style.display = "flex";
-  const label = id === "device-a" ? "Device A" : id === "device-b" ? "Device B" : id;
+// Reveal the main sender UI (the card is shown from the start in a "joining"
+// state; this fills in the assigned identity). Set the badge label + accent and
+// the tab title from the slot the hub handed us.
+function showAssigned(id: DeviceId): void {
+  const label = id === "device-a" ? "Device A" : "Device B";
   (document.getElementById("idBadge") as HTMLElement).textContent = label;
+  document.body.classList.remove("device-a", "device-b");
   document.body.classList.add(id); // drives the badge's red/green accent
   document.title = `Sender: ${label}`;
-  startSender(id);
 }
-
-(document.getElementById("btnA") as HTMLButtonElement).addEventListener("click", () =>
-  init("device-a"),
-);
-(document.getElementById("btnB") as HTMLButtonElement).addEventListener("click", () =>
-  init("device-b"),
-);
 
 // DOM-bound wrapper around the pure resolvePresetName: reads the ?preset= URL
 // param (persisting an explicit choice) and the saved value, and supplies the
@@ -99,7 +110,10 @@ function resolvePreset(): { name: QualityPreset; maxHeight: number; bpp: number 
   return { name, ...PRESETS[name] };
 }
 
-function startSender(id: string): void {
+function startSender(): void {
+  // Our slot, assigned by the hub on register. Empty until the `assigned` reply
+  // arrives; nothing that needs it (offers, ICE) runs before then.
+  let myId: DeviceId | "" = "";
   let pc: RTCPeerConnection | null = null;
   let ws: WebSocket | null = null;
   let stream: MediaStream | null = null;
@@ -108,6 +122,25 @@ function startSender(id: string): void {
   // arrives; the cap below keeps this from over-encoding on connect.
   let currentTarget: ResTarget = { w: 3840, h: 2160 };
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  // Re-registration timer used to recover from a transient room-full (see below).
+  let roomFullTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Persist our assigned slot per-room in sessionStorage so a reload reclaims
+  // the *same* identity (sent as `prefer`, which the hub honors by reclaiming
+  // the slot from our own ghost socket). sessionStorage is per-tab and survives
+  // reload but not a fresh tab, so reopening never bumps another live device.
+  const slotKey = `slot:${room}`;
+  const savedSlot = (): DeviceId | null => {
+    const s = sessionStorage.getItem(slotKey);
+    return isDeviceId(s) ? s : null;
+  };
+
+  // Our per-tab token, sent with every register so the hub only ever lets us
+  // reclaim a slot from our *own* ghost — never evict a different live device
+  // that happens to hold (or also prefer) the same slot. Without it, two tabs
+  // both preferring device-a evict each other every 3s in an endless reconnect
+  // loop. Per-tab (sessionStorage) so reopening in a new tab doesn't bump it.
+  const token = clientToken(sessionStorage);
 
   let quality = resolvePreset();
   // Auto-adapt's live ceiling: starts at the preset ceiling and steps down the
@@ -272,7 +305,7 @@ function startSender(id: string): void {
   async function pollStats(): Promise<void> {
     if (!statsEl) return;
     if (!pc || pc.connectionState !== "connected") {
-      statsEl.textContent = `${id} · ${quality.name}\nnot connected`;
+      statsEl.textContent = `${myId || "…"} · ${quality.name}\nnot connected`;
       return;
     }
     const vSender = getVideoSender(pc);
@@ -288,7 +321,7 @@ function startSender(id: string): void {
 
     const cap = `${settings?.width ?? "?"}×${settings?.height ?? "?"}`;
     statsEl.textContent =
-      `${id} · ${quality.name} (cap ${activeCapHeight}p)\n` +
+      `${myId || "…"} · ${quality.name} (cap ${activeCapHeight}p)\n` +
       `capture  ${cap}\n` +
       `encode   ${r?.frameWidth ?? 0}×${r?.frameHeight ?? 0} @ ${Math.round(r?.framesPerSecond ?? 0)}fps\n` +
       `bitrate  ${mbps.toFixed(1)} Mbps\n` +
@@ -312,15 +345,16 @@ function startSender(id: string): void {
   });
 
   async function makeOffer(): Promise<void> {
+    if (!myId) return; // no slot yet — can't address an offer
     pc?.close();
-    pc = new RTCPeerConnection({ iceServers: [] });
+    pc = new RTCPeerConnection(STUN);
     resetAdaptBaseline();
 
     for (const track of stream!.getTracks()) pc.addTrack(track, stream!);
 
     pc.onicecandidate = ({ candidate }) => {
       if (candidate)
-        ws?.send(JSON.stringify({ type: "ice-candidate", to: "receiver", from: id, candidate }));
+        ws?.send(JSON.stringify({ type: "ice-candidate", to: "receiver", from: myId, candidate }));
     };
 
     pc.onconnectionstatechange = async () => {
@@ -351,24 +385,55 @@ function startSender(id: string): void {
       JSON.stringify({
         type: "offer",
         to: "receiver",
-        from: id,
+        from: myId,
         sdp: tweakSdp(offer.sdp ?? "", true),
       }),
     );
   }
 
+  // Register as a sender; the hub assigns a slot and replies `assigned`. Prefer
+  // our current slot across reconnects, a reload's saved slot, or a ?id= hint —
+  // so we reclaim the same identity (and the hub evicts our own ghost) rather
+  // than hopping A↔B or being blocked by it.
+  function sendRegister(): void {
+    ws?.send(
+      JSON.stringify({
+        type: "register",
+        role: "sender",
+        prefer: myId || savedSlot() || preferId,
+        token,
+      }),
+    );
+  }
+
   function connectWS(): void {
-    const sock = new WebSocket(wsUrl);
+    const sock = new WebSocket(signalingUrl(room));
     ws = sock;
 
+    // Detect a half-open socket and reconnect at once, rather than sitting frozen
+    // on a connection whose close may never fire (the "stuck, no Share button"
+    // case). Re-registering also reclaims our slot from the server's ghost.
+    const hb = startHeartbeat(sock, () => {
+      sock.onclose = null; // we reconnect here; don't also fire the delayed path
+      try {
+        sock.close();
+      } catch {
+        // ignore
+      }
+      if (ws === sock) {
+        ws = null;
+        connectWS();
+      }
+    });
+
     sock.onopen = () => {
-      sock.send(JSON.stringify({ type: "register", id }));
-      setStatus("Connected to server — waiting for TV receiver…");
-      shareBtn.disabled = false;
+      sendRegister();
+      setStatus("Joining…");
       updateFavicon();
     };
 
     sock.onmessage = async (e: MessageEvent<string>) => {
+      hb.alive();
       let msg: SenderInMsg;
       try {
         msg = JSON.parse(e.data) as SenderInMsg;
@@ -376,6 +441,34 @@ function startSender(id: string): void {
         return;
       }
 
+      if (msg.type === "assigned") {
+        myId = msg.id;
+        sessionStorage.setItem(slotKey, msg.id);
+        if (roomFullTimer) {
+          clearTimeout(roomFullTimer);
+          roomFullTimer = null;
+        }
+        showAssigned(msg.id);
+        shareBtn.disabled = false;
+        if (!receiverReady) setStatus("Connected to server — waiting for TV receiver…");
+        updateFavicon();
+      }
+      if (msg.type === "room-full") {
+        // Don't treat this as terminal: a slot can be momentarily occupied by a
+        // ghost (a peer mid-reload, or a half-open socket the hub's heartbeat
+        // hasn't reaped yet). Keep re-registering so we slot in as soon as one
+        // frees, instead of wedging here with no Share button forever.
+        myId = "";
+        shareBtn.disabled = true;
+        setStatus("Two devices are already sharing to this screen — waiting for a free slot…");
+        updateFavicon();
+        if (!roomFullTimer) {
+          roomFullTimer = setTimeout(() => {
+            roomFullTimer = null;
+            sendRegister();
+          }, 3000);
+        }
+      }
       if (msg.type === "receiver-ready") {
         receiverReady = true;
         setStatus("TV receiver connected", "connected");
@@ -404,7 +497,12 @@ function startSender(id: string): void {
     };
 
     sock.onclose = () => {
+      hb.stop();
       ws = null;
+      if (roomFullTimer) {
+        clearTimeout(roomFullTimer);
+        roomFullTimer = null;
+      }
       setStatus("Server disconnected — retrying in 3s…", "error");
       shareBtn.disabled = true;
       receiverReady = false;
@@ -462,12 +560,71 @@ function startSender(id: string): void {
     })();
   });
 
+  // Screen capture is unavailable on iOS (every browser is WebKit, which never
+  // implemented getDisplayMedia) and on some others like Firefox for Android.
+  // Detect it up front so unsupported devices get a clear message instead of a
+  // raw "getDisplayMedia is not a function" error after tapping Share Screen.
+  if (typeof navigator.mediaDevices?.getDisplayMedia !== "function") {
+    shareBtn.disabled = true;
+    setStatus(
+      "This device or browser doesn't support screen sharing. Use a computer (or Android Chrome) as the sender.",
+      "error",
+    );
+    setFavicon(FAVICON.grey);
+    return;
+  }
+
   setFavicon(FAVICON.grey);
   connectWS();
 }
 
-// Auto-start from a ?id= URL. Kept at the end of the module so every top-level
-// const (PRESETS, etc.) is initialized before init() → startSender() runs —
-// otherwise the auto-init path hits a temporal-dead-zone error.
-const paramId = new URLSearchParams(location.search).get("id");
-if (paramId) init(paramId);
+// ── Room resolution ─────────────────────────────────────────────────────────
+// A sender must join a specific TV's room. The QR / join-link from the receiver
+// carries ?room=CODE; if it's missing or malformed we ask the user to type the
+// code shown on the TV. Only once a valid room is set do we reveal the sender
+// card and connect — the hub then assigns this device a slot (A or B) by arrival
+// order, so there's nothing to pick. Kept at the end of the module so every
+// top-level const (PRESETS, etc.) is initialized before startSender() runs.
+const params = new URLSearchParams(location.search);
+
+function proceed(): void {
+  (document.getElementById("mainScreen") as HTMLElement).style.display = "flex";
+  startSender();
+}
+
+const urlCode = coerceRoomCode(params.get("room"));
+if (urlCode) {
+  room = urlCode;
+  proceed();
+} else if (signalingHost() === null) {
+  // No hub configured ⇒ the local server.ts is a single global hub that ignores
+  // room codes, so skip the join step and keep the original `pnpm start` flow.
+  proceed();
+} else {
+  // A hosted (multi-tenant) hub needs a room to target. Ask for the join code,
+  // hiding the picker until we have one.
+  const joinScreen = document.getElementById("joinScreen") as HTMLElement;
+  joinScreen.style.display = "flex";
+  const input = document.getElementById("roomInput") as HTMLInputElement;
+  const joinBtn = document.getElementById("roomJoin") as HTMLButtonElement;
+  const joinError = document.getElementById("joinError") as HTMLElement;
+
+  const submit = (): void => {
+    const code = coerceRoomCode(input.value);
+    if (!code) {
+      joinError.textContent = "Enter the code shown on the TV.";
+      return;
+    }
+    room = code;
+    // Keep the code on a reload (and for the ?id= auto-start path).
+    persistRoomInUrl(code);
+    joinScreen.style.display = "none";
+    proceed();
+  };
+
+  joinBtn.addEventListener("click", submit);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submit();
+  });
+  input.focus();
+}

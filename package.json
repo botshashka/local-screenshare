@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "packageManager": "pnpm@11.1.3",
   "scripts": {
-    "build": "tsc -p tsconfig.server.json && tsc -p tsconfig.browser.json",
+    "build": "tsc -p tsconfig.server.json && tsc -p tsconfig.browser.json && node scripts/inject-hub.mjs",
     "prestart": "pnpm build",
     "start": "node dist/server.js",
     "dev": "pnpm build && concurrently \"tsc -p tsconfig.server.json --watch\" \"tsc -p tsconfig.browser.json --watch\" \"node --watch dist/server.js\"",

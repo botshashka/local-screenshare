@@ -1,23 +1,12 @@
 import express, { type Request, type Response } from "express";
-import { WebSocket, WebSocketServer } from "ws";
+import { WebSocketServer } from "ws";
 import * as http from "http";
 import * as https from "https";
 import { execSync } from "child_process";
 import { networkInterfaces } from "os";
 import { readFileSync, mkdirSync, existsSync } from "fs";
 import * as path from "path";
-
-const SENDER_IDS = ["device-a", "device-b"] as const;
-
-interface WsMsg {
-  type: string;
-  id?: string;
-  to?: string;
-  from?: string;
-  sdp?: string;
-  candidate?: unknown;
-  target?: { w: number; h: number };
-}
+import { createHub, HB_INTERVAL_MS } from "./hub";
 
 const ips: string[] = ["127.0.0.1"];
 for (const nets of Object.values(networkInterfaces())) {
@@ -73,77 +62,14 @@ const httpServer = http.createServer(app);
 const wssHttps = new WebSocketServer({ server: httpsServer });
 const wssHttp = new WebSocketServer({ server: httpServer });
 
-const clients = new Map<string, WebSocket>();
+// One signaling hub shared by both listeners (HTTPS senders + HTTP receiver).
+const hub = createHub({ log: (m) => console.log(m) });
+wssHttps.on("connection", (ws) => hub.handleConnection(ws));
+wssHttp.on("connection", (ws) => hub.handleConnection(ws));
 
-function send(ws: WebSocket, msg: object): void {
-  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
-}
-
-function handleConnection(ws: WebSocket): void {
-  let clientId: string | null = null;
-
-  ws.on("message", (raw) => {
-    let msg: WsMsg;
-    try {
-      msg = JSON.parse(raw.toString()) as WsMsg;
-    } catch {
-      return;
-    }
-
-    if (msg.type === "register" && msg.id) {
-      clientId = msg.id;
-      clients.set(clientId, ws);
-      console.log(`[+] ${clientId}`);
-
-      if (clientId === "receiver") {
-        // Set up the receiver (sender-connected) before telling senders to
-        // (re)offer (receiver-ready), mirroring the sender branch below, so the
-        // receiver's peer connection exists before an offer can arrive.
-        for (const id of SENDER_IDS) {
-          if (clients.has(id)) send(ws, { type: "sender-connected", id });
-        }
-        for (const id of SENDER_IDS) {
-          const sender = clients.get(id);
-          if (sender) send(sender, { type: "receiver-ready" });
-        }
-      } else {
-        const receiver = clients.get("receiver");
-        if (receiver) {
-          send(receiver, { type: "sender-connected", id: clientId });
-          send(ws, { type: "receiver-ready" });
-        }
-      }
-      return;
-    }
-
-    if (msg.to) {
-      const target = clients.get(msg.to);
-      if (target) send(target, msg);
-    }
-  });
-
-  // Swallow per-socket errors so an abrupt drop can't surface as an unhandled
-  // 'error' event; the 'close' that follows handles cleanup.
-  ws.on("error", () => {});
-
-  ws.on("close", () => {
-    if (!clientId) return;
-    clients.delete(clientId);
-    console.log(`[-] ${clientId}`);
-
-    if (clientId === "receiver") {
-      for (const id of SENDER_IDS) {
-        const sender = clients.get(id);
-        if (sender) send(sender, { type: "peer-disconnected", id: "receiver" });
-      }
-    } else {
-      const receiver = clients.get("receiver");
-      if (receiver) send(receiver, { type: "peer-disconnected", id: clientId });
-    }
-  });
-}
-wssHttps.on("connection", handleConnection);
-wssHttp.on("connection", handleConnection);
+// Liveness sweep: reap any socket that's gone silent past the heartbeat timeout,
+// freeing its sender slot so a reconnecting device isn't blocked by its ghost.
+setInterval(() => hub.sweep(), HB_INTERVAL_MS).unref();
 
 const PORT = process.env["PORT"] ? parseInt(process.env["PORT"], 10) : 4242;
 // HTTP receiver port sits right after the HTTPS port; override with HTTP_PORT.
@@ -154,8 +80,9 @@ httpsServer.listen(PORT, "0.0.0.0", () => {
   console.log(
     `\nScreenshare running on https://${lanIp}:${PORT} (senders) + http://${lanIp}:${HTTP_PORT} (TV)`,
   );
-  console.log(`\n  Device A:   https://${lanIp}:${PORT}/sender.html?id=device-a`);
-  console.log(`  Device B:   https://${lanIp}:${PORT}/sender.html?id=device-b`);
+  // Senders are auto-assigned Device A then Device B by arrival order — just
+  // open the one URL on each device. (?id=device-a/-b still works as a hint.)
+  console.log(`\n  Sender(s):  https://${lanIp}:${PORT}/sender.html`);
   console.log(`  TV:         http://${lanIp}:${HTTP_PORT}/receiver.html`);
   console.log(
     `\n  ⚠  Senders: click "Advanced" → "Proceed" to bypass the self-signed cert warning.` +
