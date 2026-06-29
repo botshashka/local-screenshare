@@ -132,7 +132,7 @@ export class SignalingRoom {
     const id = this.idOf(ws);
     if (id) this.announceGone(id, ws);
     try {
-      ws.serializeAttachment({ id: null, seen: 0 });
+      ws.serializeAttachment({ id: null, seen: 0, token: "" });
       ws.close(1000, "stale");
     } catch {
       // already closing

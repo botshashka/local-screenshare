@@ -147,6 +147,17 @@ if (hubConfigured) {
   renderRoomPanel();
 }
 
+// The sender URL a join QR/link points at: sender.html?room=CODE, carrying an
+// explicit ?hub= through so a join opened from a local-dev receiver targets the
+// same hub the receiver is using.
+function senderUrl(code: string): string {
+  const url = new URL("sender.html", location.href);
+  url.searchParams.set("room", code);
+  const hub = params.get("hub");
+  if (hub) url.searchParams.set("hub", hub);
+  return url.toString();
+}
+
 function renderRoomPanel(): void {
   const codeEl = document.getElementById("roomCode");
   if (codeEl) codeEl.textContent = room;
@@ -154,18 +165,19 @@ function renderRoomPanel(): void {
   // not the full sender URL — the QR carries the full link for scanning.
   const domainEl = document.getElementById("roomDomain");
   if (domainEl) domainEl.textContent = location.host;
-  // Carry an explicit ?hub= through so a join opened from a local-dev receiver
-  // targets the same hub the receiver is using.
-  const joinUrl = new URL("sender.html", location.href);
-  joinUrl.searchParams.set("room", room);
-  const hub = params.get("hub");
-  if (hub) joinUrl.searchParams.set("hub", hub);
   let qrDataUrl = "";
   if (typeof qrcode === "function") {
-    const qr = qrcode(0, "M");
-    qr.addData(joinUrl.toString());
-    qr.make();
-    qrDataUrl = qr.createDataURL(6, 8);
+    // A QR encode can throw (e.g. capacity overflow on a very long ?hub= URL).
+    // Degrade to the text code rather than letting it abort module init — the
+    // signaling connectWS() below must still run.
+    try {
+      const qr = qrcode(0, "M");
+      qr.addData(senderUrl(room));
+      qr.make();
+      qrDataUrl = qr.createDataURL(6, 8);
+    } catch {
+      qrDataUrl = "";
+    }
   }
   const img = document.getElementById("roomQr") as HTMLImageElement | null;
   if (img && qrDataUrl) img.src = qrDataUrl;
@@ -204,11 +216,7 @@ function renderRoomPanel(): void {
             "That’s this screen’s own code — enter the code from the screen you want to share to.";
         return;
       }
-      const target = new URL("sender.html", location.href);
-      target.searchParams.set("room", code);
-      const hub = params.get("hub");
-      if (hub) target.searchParams.set("hub", hub);
-      location.href = target.toString();
+      location.href = senderUrl(code);
     };
   }
 }
@@ -224,6 +232,10 @@ function renderRoomPanel(): void {
 // appears. Hiding it once connected is always immediate.
 const ROOM_PANEL_GRACE_MS = 1500;
 let roomPanelGraceTimer: ReturnType<typeof setTimeout> | undefined;
+
+// How long after a peer connection reports `connected` to wait for a first
+// decoded frame before revealing the slot anyway (see the fallback in createPC).
+const REVEAL_FALLBACK_MS = 2500;
 
 // `joining` hides all TV-viewing chrome (#tvView) so the card sits on a clean
 // full screen, not over empty "waiting" placeholders; the card itself toggles in
@@ -355,6 +367,18 @@ function markDisconnected(id: string): void {
   updateRoomPanel();
 }
 
+// Mark a slot live and hide the join panel. Normally fired on the first decoded
+// frame; also used as a fallback once the peer connection reports `connected`,
+// so a stream that never decodes a frame can't leave the join card stuck over a
+// live connection.
+function revealSlot(id: string): void {
+  const slot = slots[id];
+  if (!slot) return;
+  slot.classList.remove("disconnected");
+  slot.classList.add("connected");
+  updateRoomPanel();
+}
+
 layoutBtn?.addEventListener("click", cycleLayout);
 
 // TV remote color buttons drive direct selection, with r/g/y/b as desktop
@@ -422,25 +446,19 @@ function createPC(senderId: string): RTCPeerConnection {
     if (!video.srcObject) video.srcObject = new MediaStream();
     (video.srcObject as MediaStream).addTrack(e.track);
     video.muted = false;
-    const slot = slots[senderId];
-    if (!slot) return;
+    if (!slots[senderId]) return;
     // Keep the video hidden until the first frame is actually decoded.
     // Revealing it the moment a track arrives shows the browser's native
     // play-button placeholder for ~0.5s while it waits for frames.
-    const reveal = () => {
-      slot.classList.remove("disconnected");
-      slot.classList.add("connected");
-      updateRoomPanel();
-    };
     const rvfc = (
       video as HTMLVideoElement & {
         requestVideoFrameCallback?: (cb: () => void) => void;
       }
     ).requestVideoFrameCallback;
     if (rvfc) {
-      rvfc.call(video, reveal);
+      rvfc.call(video, () => revealSlot(senderId));
     } else {
-      video.addEventListener("playing", reveal, { once: true });
+      video.addEventListener("playing", () => revealSlot(senderId), { once: true });
     }
   };
 
@@ -457,6 +475,13 @@ function createPC(senderId: string): RTCPeerConnection {
         if ("jitterBufferTarget" in r)
           (r as RTCRtpReceiver & { jitterBufferTarget: number }).jitterBufferTarget = 50;
       });
+      // Fallback for a connected-but-never-decoding stream: the first-frame
+      // reveal above is the normal path, but if no frame arrives within the
+      // grace window, reveal anyway so the join card doesn't sit over a live
+      // connection. revealSlot is idempotent, so a frame landing first wins.
+      setTimeout(() => {
+        if (pcs[senderId] === pc && pc.connectionState === "connected") revealSlot(senderId);
+      }, REVEAL_FALLBACK_MS);
     }
     if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
       markDisconnected(senderId);
@@ -482,14 +507,9 @@ function connectWS(): void {
 
   // Keep the receiver's slot from being reaped as a ghost while it sits idle
   // between layout changes, and detect a half-open socket so it reconnects
-  // instead of leaving senders paired to a dead TV.
+  // instead of leaving senders paired to a dead TV. startHeartbeat tears the
+  // dead socket down; we just reopen if it's still the current one.
   const hb = startHeartbeat(sock, () => {
-    sock.onclose = null;
-    try {
-      sock.close();
-    } catch {
-      // ignore
-    }
     if (ws === sock) connectWS();
   });
 

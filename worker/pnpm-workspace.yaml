@@ -1,5 +1,7 @@
 # wrangler's native deps need their build scripts to run: workerd is the local
-# runtime for `wrangler dev`, esbuild bundles the Worker. sharp is unused.
+# runtime for `wrangler dev`, esbuild bundles the Worker. Without this, pnpm 10+
+# blocks their postinstall scripts and `wrangler dev`/`deploy` fail on a fresh
+# install. (sharp is pulled in transitively but unused, so it's left unbuilt.)
 allowBuilds:
   esbuild: true
   sharp: false

@@ -15,6 +15,7 @@ this folder** and run `server.ts`, or any other WebSocket host that implements t
 pnpm install
 pnpm dev        # local hub via Miniflare (ws://localhost:8787)
 pnpm deploy     # publish; prints your hub URL
+pnpm test       # vitest inside workerd — DO slot assignment, relay, liveness
 pnpm typecheck
 ```
 

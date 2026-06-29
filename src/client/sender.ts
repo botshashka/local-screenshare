@@ -24,11 +24,13 @@ import {
 // bottom of the module before startSender() runs.
 let room = "";
 
+// Parsed once and reused across the module (room resolution, ?id= hint, ?preset=).
+const params = new URLSearchParams(location.search);
+
 // An optional slot hint from ?id=device-a/-b. The hub still owns assignment —
 // this is only honored when that slot is free, so it can't steal an in-use one.
-const preferId: DeviceId | null = isDeviceId(new URLSearchParams(location.search).get("id"))
-  ? (new URLSearchParams(location.search).get("id") as DeviceId)
-  : null;
+const idParam = params.get("id");
+const preferId: DeviceId | null = isDeviceId(idParam) ? idParam : null;
 
 type StatusClass = "" | "connected" | "error";
 
@@ -100,7 +102,7 @@ function showAssigned(id: DeviceId): void {
 // param (persisting an explicit choice) and the saved value, and supplies the
 // machine's core count for the default.
 function resolvePreset(): { name: QualityPreset; maxHeight: number; bpp: number } {
-  const fromUrl = new URLSearchParams(location.search).get("preset");
+  const fromUrl = params.get("preset");
   if (isPreset(fromUrl)) localStorage.setItem("preset", fromUrl);
   const name = resolvePresetName(
     fromUrl,
@@ -412,14 +414,9 @@ function startSender(): void {
 
     // Detect a half-open socket and reconnect at once, rather than sitting frozen
     // on a connection whose close may never fire (the "stuck, no Share button"
-    // case). Re-registering also reclaims our slot from the server's ghost.
+    // case). startHeartbeat tears the dead socket down; we just reopen if it's
+    // still the current one. Re-registering reclaims our slot from the ghost.
     const hb = startHeartbeat(sock, () => {
-      sock.onclose = null; // we reconnect here; don't also fire the delayed path
-      try {
-        sock.close();
-      } catch {
-        // ignore
-      }
       if (ws === sock) {
         ws = null;
         connectWS();
@@ -585,7 +582,7 @@ function startSender(): void {
 // card and connect — the hub then assigns this device a slot (A or B) by arrival
 // order, so there's nothing to pick. Kept at the end of the module so every
 // top-level const (PRESETS, etc.) is initialized before startSender() runs.
-const params = new URLSearchParams(location.search);
+// (`params` is the single module-level URLSearchParams declared up top.)
 
 function proceed(): void {
   (document.getElementById("mainScreen") as HTMLElement).style.display = "flex";

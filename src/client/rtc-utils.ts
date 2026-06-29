@@ -34,10 +34,18 @@ export function signalingHost(): string | null {
   return null;
 }
 
+// A localhost or LAN/raw-IPv4 host can't present a public TLS cert, so a hub
+// given as one is assumed plain ws:// (local dev). Anything else (a domain) is
+// assumed wss. An explicit scheme on the host always wins over this guess.
+function isLocalOrLanHost(hostPort: string): boolean {
+  const host = hostPort.replace(/:\d+$/, "");
+  return host === "localhost" || host === "[::1]" || /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
+}
+
 // Build the signaling WebSocket URL for a room. A configured hub is assumed to
-// be TLS (wss) unless it carries an explicit ws/http scheme or is a localhost
-// host (local dev); the same-origin fallback mirrors the page's own protocol.
-// `host` is injectable for testing.
+// be TLS (wss) unless it carries an explicit ws/http scheme or is a localhost /
+// LAN host (local dev); the same-origin fallback mirrors the page's own
+// protocol. `host` is injectable for testing.
 export function signalingUrl(roomId: string, host: string | null = signalingHost()): string {
   const query = `?room=${encodeURIComponent(roomId)}`;
   if (!host) {
@@ -51,10 +59,12 @@ export function signalingUrl(roomId: string, host: string | null = signalingHost
     const proto = withScheme[1]!.toLowerCase();
     scheme = proto === "http" || proto === "ws" ? "ws" : "wss";
     bare = withScheme[2]!;
-  } else if (/^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(:\d+)?$/.test(host)) {
-    scheme = "ws";
   }
-  bare = bare.replace(/\/+$/, "");
+  // Keep only the authority (host:port) — drop any path/query the host carried,
+  // so a hub given as e.g. "example.com/ws" doesn't become ".../ws/ws" (the hub
+  // serves only "/ws", so the doubled path would 404).
+  bare = bare.replace(/[/?#].*$/, "");
+  if (!withScheme && isLocalOrLanHost(bare)) scheme = "ws";
   return `${scheme}://${bare}/ws${query}`;
 }
 
@@ -69,13 +79,15 @@ export const HB_INTERVAL_MS = 10_000;
 export const HB_TIMEOUT_MS = 30_000;
 
 // Drive a socket's heartbeat. Sends a ping each interval and, if nothing has
-// arrived from the server within the timeout, treats the socket as half-open and
-// invokes onStale (the caller drops it and reconnects, rather than waiting on a
-// close event that a dead connection may never deliver). Call alive() from the
-// socket's onmessage and stop() from its onclose.
+// arrived from the server within the timeout, treats the socket as half-open: it
+// stops the heartbeat, tears the dead socket down (nulls its onclose so the
+// delayed reconnect path can't also fire, then closes it), and invokes
+// onReconnect so the caller opens a fresh socket — rather than waiting on a close
+// event a dead connection may never deliver. Call alive() from the socket's
+// onmessage and stop() from its onclose.
 export function startHeartbeat(
-  ws: Pick<WebSocket, "send" | "close">,
-  onStale: () => void,
+  ws: Pick<WebSocket, "send" | "close" | "onclose">,
+  onReconnect: () => void,
 ): { alive: () => void; stop: () => void } {
   let lastSeen = Date.now();
   let stopped = false;
@@ -87,7 +99,13 @@ export function startHeartbeat(
     if (stopped) return;
     if (Date.now() - lastSeen > HB_TIMEOUT_MS) {
       stop();
-      onStale();
+      ws.onclose = null;
+      try {
+        ws.close();
+      } catch {
+        // already closing
+      }
+      onReconnect();
       return;
     }
     try {

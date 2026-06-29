@@ -65,21 +65,40 @@ interface TestClient {
 
 async function connect(): Promise<TestClient> {
   const before = serverSockets.length;
-  const ws = new WebSocket(url);
   const inbox: Inbox[] = [];
   const waiters: { match: (m: Inbox) => boolean; resolve: (m: Inbox) => void }[] = [];
 
-  ws.on("message", (raw: { toString(): string }) => {
-    const msg = JSON.parse(raw.toString()) as Inbox;
-    const i = waiters.findIndex((w) => w.match(msg));
-    if (i >= 0) waiters.splice(i, 1)[0]!.resolve(msg);
-    else inbox.push(msg);
-  });
-
-  await new Promise<void>((resolve, reject) => {
-    ws.once("open", () => resolve());
-    ws.once("error", reject);
-  });
+  // Open with a small retry. Tearing down and re-binding a `port: 0` server on
+  // every test occasionally races the client handshake into a transient
+  // connection error/400 under parallel-file load — recreating the socket keeps
+  // the suite testing hub logic rather than ephemeral-port timing. The server
+  // sends nothing until we register (after connect returns), so attaching the
+  // message handler here can't miss a frame.
+  let ws!: WebSocket;
+  for (let attempt = 0; ; attempt++) {
+    ws = new WebSocket(url);
+    ws.on("message", (raw: { toString(): string }) => {
+      const msg = JSON.parse(raw.toString()) as Inbox;
+      const i = waiters.findIndex((w) => w.match(msg));
+      if (i >= 0) waiters.splice(i, 1)[0]!.resolve(msg);
+      else inbox.push(msg);
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        ws.once("open", () => resolve());
+        ws.once("error", reject);
+      });
+      break;
+    } catch (err) {
+      try {
+        ws.terminate();
+      } catch {
+        // ignore
+      }
+      if (attempt >= 4) throw err;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+  }
 
   const client: TestClient = {
     raw: ws,
@@ -241,6 +260,22 @@ describe("token-gated reclaim (the two-tab 3s livelock)", () => {
     expect((await ghost.closed()).code).toBe(1000);
     expect(hub.clients.get("device-a")).toBe(reconnect.server);
   });
+
+  it("a socket re-registering to a different slot frees the one it held", async () => {
+    // The same socket registers as device-a, then re-registers preferring the
+    // now-free device-b. It must end up mapped to device-b ONLY — never left
+    // holding both slots (which would make `to`-routing ambiguous and falsely
+    // report the room full to a real third device).
+    const a = await connect();
+    a.send({ type: "register", role: "sender", token: "tab-1" });
+    expect((await a.next("assigned")).id).toBe("device-a");
+
+    a.send({ type: "register", role: "sender", prefer: "device-b", token: "tab-1" });
+    expect((await a.next("assigned")).id).toBe("device-b");
+
+    expect(hub.clients.get("device-b")).toBe(a.server);
+    expect(hub.clients.has("device-a")).toBe(false);
+  });
 });
 
 describe("close guard", () => {
@@ -280,7 +315,7 @@ describe("pairing and relay", () => {
     expect((await sender.next()).type).toBe("receiver-ready");
   });
 
-  it("relays an addressed frame and stamps nothing it shouldn't drop", async () => {
+  it("relays an addressed frame, stamping from with the sender's registered id", async () => {
     const receiver = await connect();
     receiver.send({ type: "register", role: "receiver" });
     const sender = await connect();
@@ -288,9 +323,20 @@ describe("pairing and relay", () => {
     await sender.next("receiver-ready");
     await receiver.next("sender-connected");
 
-    sender.send({ type: "offer", to: "receiver", sdp: "v=0..." });
+    // Even a spoofed `from` is overwritten with the connection's own id — the
+    // hub never trusts a client-supplied `from` on a public relay.
+    sender.send({ type: "offer", to: "receiver", from: "receiver", sdp: "v=0..." });
     const offer = await receiver.next("offer");
     expect(offer.sdp).toBe("v=0...");
+    expect(offer.from).toBe("device-a");
+  });
+
+  it("drops a relay frame from a socket that hasn't registered", async () => {
+    const receiver = await connect();
+    receiver.send({ type: "register", role: "receiver" });
+    const stranger = await connect(); // never registers
+    stranger.send({ type: "offer", to: "receiver", sdp: "x" });
+    await expectNo(receiver, "offer");
   });
 
   it("drops an addressed frame when the target is absent", async () => {

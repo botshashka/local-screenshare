@@ -176,6 +176,12 @@ export function createHub(opts: { log?: (msg: string) => void; timeoutMs?: numbe
         // registration or emit a stray peer-disconnected.
         const stale = clients.get(clientId);
         if (stale && stale !== ws) stale.close(1000, "replaced");
+        // Drop any other slot this same socket already held, so re-registering
+        // to a different slot can't leave it mapped under two ids (the Worker
+        // can't hit this — it overwrites a single per-socket attachment).
+        for (const [id, sock] of clients) {
+          if (sock === ws && id !== clientId) clients.delete(id);
+        }
         clients.set(clientId, ws);
         log(`[+] ${clientId}`);
 
@@ -200,9 +206,13 @@ export function createHub(opts: { log?: (msg: string) => void; timeoutMs?: numbe
         return;
       }
 
+      // Relay everything else to the addressed peer, stamping `from` with the
+      // sender's own registered id — never trust a client-supplied `from`, and
+      // drop a relay from a socket that hasn't registered. Mirrors the Worker.
       if (msg.to) {
+        if (!clientId) return;
         const target = clients.get(msg.to);
-        if (target) send(target, msg);
+        if (target) send(target, { ...msg, from: clientId });
       }
     });
 

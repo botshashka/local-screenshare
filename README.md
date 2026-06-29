@@ -50,7 +50,7 @@ On a desktop you can also cycle the layouts with the on-screen button at the bot
 
 ## Hosting it (zero-install)
 
-The local `pnpm start` above runs the signaling server on your own machine — great for an offline LAN, but everyone has to be able to reach *your* host. To make this a thing people just open in a browser (nothing to install or launch), serve the **static pages** from any static host and run the **signaling hub** anywhere that can hold a WebSocket. The client isn't tied to a provider — it resolves its hub from `?hub=` → `<meta name="signaling-hub">` → its own origin, so you point it wherever you like (and an empty meta just falls back to a co-located `server.ts`).
+The local `pnpm start` above runs the signaling server on your own machine — great for an offline LAN, but everyone has to be able to reach *your* host. To make this a thing people just open in a browser (nothing to install or launch), serve the **static pages** from any static host and run the **signaling hub** anywhere that can hold a WebSocket. The client isn't tied to a provider — it resolves its hub from `?hub=` → the build-time `SIGNALING_HUB` (baked into `js/config.js`) → `<meta name="signaling-hub">` → its own origin, so you point it wherever you like (and with nothing set it just falls back to a co-located `server.ts`).
 
 Whatever you pick, media still flows **peer-to-peer over the LAN** — the hub only relays the SDP/ICE handshake, never the video. The client adds public **STUN** for candidate gathering and runs **no TURN**, so nothing is ever relayed through the cloud (a relay-hostile network just fails to connect instead of routing video off-LAN). Serve the pages over real TLS and the self-signed-cert warning on senders and the smart-TV `wss://` hang both disappear.
 
@@ -76,7 +76,7 @@ A Cloudflare deploy is **two independent pieces, with two separate deploy comman
 | Piece | What it is | Deploy command | Run it from | Redeploy when you change… |
 |---|---|---|---|---|
 | **Worker** | the signaling hub (`worker/`) | `pnpm deploy` | `worker/` | anything in `worker/` |
-| **Pages** | the static UI (`public/`) | `wrangler pages deploy public` | **repo root** | `src/client/`, `public/*.html`, or the hub host |
+| **Pages** | the static UI (`public/`) | `npx wrangler pages deploy public` | **repo root** | `src/client/`, `public/*.html`, or the hub host |
 
 > There is **no `pnpm deploy` at the repo root** — that script lives only in `worker/package.json` and means "deploy the Worker." The Pages deploy is a separate `wrangler` command run from the repo root.
 
@@ -165,7 +165,7 @@ pnpm test     # vitest — unit tests for the encoding/preset/SDP logic
 
 The pure logic in `src/client/rtc-utils.ts` (resolution/bitrate math, preset resolution, the auto-adapt ladder, SDP munging, plus the signaling-URL resolver and room-code helpers) is covered by `test/`.
 
-The optional serverless signaling hub is a separate self-contained project under `worker/` (`pnpm install` there, then `pnpm dev` for a local hub or `pnpm deploy` to publish) — see [`worker/README.md`](worker/README.md). It's a faithful port of `server.ts`'s relay; you don't need it if you run `server.ts` (or any other WebSocket hub).
+The optional serverless signaling hub is a separate self-contained project under `worker/` (`pnpm install` there, then `pnpm dev` for a local hub, `pnpm test` for its Durable-Object test suite, or `pnpm deploy` to publish) — see [`worker/README.md`](worker/README.md). It's a faithful port of `server.ts`'s relay; you don't need it if you run `server.ts` (or any other WebSocket hub).
 
 ## How it works
 
@@ -174,4 +174,4 @@ The signaling layer handles **signaling only** — no media passes through it. V
 - **Local (`server.ts`)** — the Node server listens on both HTTPS (senders) and HTTP (the TV receiver) sharing one WebSocket hub, so an `http`-origin receiver and `https`-origin senders pair over the same channel. The self-signed TLS cert is generated once on first run and persisted in `.certs/`. Best for an isolated/offline LAN. It's a single global hub, so the room code is ignored.
 - **Hosted hub** — any WebSocket host that routes `wss://…/ws?room=CODE` to a per-room hub instance, keeping households isolated. A ready-made Cloudflare Worker + Durable Object implementation ships in `worker/src/signaling.ts`. Real TLS, zero install. See [Hosting it](#hosting-it-zero-install).
 
-The same client bundles drive both: the page resolves its signaling endpoint from `?hub=` → `<meta name="signaling-hub">` → its own origin, so a remotely-served page targets your hub while a `server.ts`-served page stays same-origin. Either way, media stays on the local network — STUN only assists the handshake and no TURN means video is never relayed.
+The same client bundles drive both: the page resolves its signaling endpoint from `?hub=` → the build-time `SIGNALING_HUB` (baked into `js/config.js`) → `<meta name="signaling-hub">` → its own origin, so a remotely-served page targets your hub while a `server.ts`-served page stays same-origin. Either way, media stays on the local network — STUN only assists the handshake and no TURN means video is never relayed.
