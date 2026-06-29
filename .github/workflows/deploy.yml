@@ -1,0 +1,55 @@
+name: Deploy to Cloudflare
+
+# Redeploy the signaling hub (Worker) and the static pages on every push to main.
+# Gates on the test suites + lint first, so a broken commit can't reach prod.
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   CLOUDFLARE_API_TOKEN   — token with "Workers Scripts: Edit" + "Cloudflare Pages: Edit"
+#   CLOUDFLARE_ACCOUNT_ID  — your account id
+#   SIGNALING_HUB          — your hub host, e.g. screenshare-signaling.<subdomain>.workers.dev
+#                            (kept here, never committed to this public repo)
+
+on:
+  push:
+    branches: [main]
+
+# Never let two prod deploys overlap.
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # ── Install (root + worker are separate pnpm workspaces) ──
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile
+        working-directory: worker
+
+      # ── Gate: lint + both test suites must pass before anything ships ──
+      - run: pnpm lint
+      - run: pnpm test
+      - run: pnpm test
+        working-directory: worker
+
+      # ── Deploy the signaling hub (Worker + Durable Object) ──
+      - run: npx wrangler deploy
+        working-directory: worker
+
+      # ── Build the pages with the hub host baked in, then publish ──
+      # Static upload needs no bundling, so a fetched wrangler is fine here (the
+      # Worker step above uses worker/'s pinned local wrangler). @4 pins the major.
+      - run: pnpm build
+        env:
+          SIGNALING_HUB: ${{ secrets.SIGNALING_HUB }}
+      - run: npx --yes wrangler@4 pages deploy public --project-name screenshare --branch main
