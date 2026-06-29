@@ -7,6 +7,8 @@ import {
   persistRoomInUrl,
   tweakSdp,
   startHeartbeat,
+  trackConnectionLiveness,
+  isDeadConnectionState,
   type ResTarget,
   type ReceiverInMsg,
 } from "./rtc-utils.js";
@@ -119,6 +121,8 @@ const videos: Record<string, HTMLVideoElement> = {
 
 const pcs: Record<string, RTCPeerConnection> = {};
 const retryTimers: Record<string, ReturnType<typeof setTimeout>> = {};
+// Per-sender connection-liveness watchers (transient-flap vs. real-loss arbiter).
+const livenessWatchers: Record<string, ReturnType<typeof trackConnectionLiveness>> = {};
 
 // ── Room ─────────────────────────────────────────────────────────────────────
 // Rooms exist only to isolate tenants on a shared public hub. A co-located
@@ -356,14 +360,25 @@ function toggleSecondary(): void {
   applyByCls(cls.startsWith("pip") ? `solo-${dev}` : `pip-${dev}`);
 }
 
+// Mark a slot's stream as not-currently-live: drop the `connected` class and let
+// the room panel reconsider showing the join card.
+//
+// INVARIANT — do not clear `video.srcObject` here, and do not let any
+// transient/recoverable drop reach a place that does. This rests on a browser
+// semantic that no test in this repo can verify (a fake PC would just assume it):
+// when ICE self-heals from `disconnected` back to `connected`, the *same* track
+// resumes and `ontrack` does NOT fire again. So nulling the source on a flap
+// would leave the slot permanently blank until a page reload — the original bug.
+// We instead keep the last frame (it freezes, then unfreezes on heal). The source
+// is nulled in exactly one place: the `peer-disconnected` handler, where the hub
+// has told us the sender truly left and a fresh `ontrack` is coming via rebuild.
+// If you change this, re-verify in real Chrome via the DevTools offline toggle.
 function markDisconnected(id: string): void {
   const slot = slots[id];
   if (slot) {
     slot.classList.remove("connected");
     slot.classList.add("disconnected");
   }
-  const video = videos[id];
-  if (video) video.srcObject = null;
   updateRoomPanel();
 }
 
@@ -436,9 +451,34 @@ setTimeout(() => {
 
 function createPC(senderId: string): RTCPeerConnection {
   pcs[senderId]?.close();
+  livenessWatchers[senderId]?.stop();
+
+  // A fresh PC for this slot means a fresh stream: drop any stale/ended tracks
+  // from a prior connection so the rebuild's ontrack starts clean (ontrack below
+  // appends into this). Harmless on the first-ever connection (was null).
+  const video = videos[senderId];
+  if (video) video.srcObject = new MediaStream();
 
   const pc = new RTCPeerConnection(STUN);
   pcs[senderId] = pc;
+
+  // Decide transient flap vs. real loss: only escalate (tear the slot down and
+  // re-offer) on a `failed`, or a `disconnected` that doesn't self-heal in time.
+  const watcher = trackConnectionLiveness({
+    onLost: () => {
+      if (pcs[senderId] !== pc) return; // superseded by a newer PC
+      markDisconnected(senderId);
+      if (!retryTimers[senderId]) {
+        retryTimers[senderId] = setTimeout(() => {
+          delete retryTimers[senderId];
+          if (pcs[senderId] === pc && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "request-reoffers", to: senderId }));
+          }
+        }, 2000);
+      }
+    },
+  });
+  livenessWatchers[senderId] = watcher;
 
   pc.ontrack = (e) => {
     const video = videos[senderId];
@@ -468,6 +508,8 @@ function createPC(senderId: string): RTCPeerConnection {
   };
 
   pc.onconnectionstatechange = () => {
+    // The watcher arbitrates disconnect/failed → its onLost does the teardown.
+    watcher.update(pc.connectionState);
     if (pc.connectionState === "connected") {
       clearTimeout(retryTimers[senderId]);
       delete retryTimers[senderId];
@@ -482,17 +524,6 @@ function createPC(senderId: string): RTCPeerConnection {
       setTimeout(() => {
         if (pcs[senderId] === pc && pc.connectionState === "connected") revealSlot(senderId);
       }, REVEAL_FALLBACK_MS);
-    }
-    if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
-      markDisconnected(senderId);
-      if (!retryTimers[senderId]) {
-        retryTimers[senderId] = setTimeout(() => {
-          delete retryTimers[senderId];
-          if (pcs[senderId] === pc && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "request-reoffers", to: senderId }));
-          }
-        }, 2000);
-      }
     }
   };
 
@@ -539,7 +570,15 @@ function connectWS(): void {
 
     if (msg.type === "offer") {
       const senderId = msg.from;
-      const pc = pcs[senderId] ?? createPC(senderId);
+      // A recovery re-offer arrives on a dead PC (the sender rebuilt after a real
+      // loss); reusing it would leave ontrack silent and the video blank. Build a
+      // fresh PC in that case so ontrack re-fires and repopulates the slot; reuse
+      // a healthy PC for an ordinary renegotiation (e.g. a res-hint re-offer).
+      const existing = pcs[senderId];
+      const pc =
+        !existing || isDeadConnectionState(existing.connectionState)
+          ? createPC(senderId)
+          : existing;
       await pc.setRemoteDescription(new RTCSessionDescription({ type: "offer", sdp: msg.sdp }));
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
@@ -559,10 +598,19 @@ function connectWS(): void {
     }
 
     if (msg.type === "peer-disconnected") {
+      // The hub says this sender has genuinely left — no rebuild is coming, so
+      // tear the slot fully down and clear the video (the one place we null the
+      // source; a mere ICE flap must not reach here).
       const { id } = msg;
       markDisconnected(id);
+      livenessWatchers[id]?.stop();
+      delete livenessWatchers[id];
+      clearTimeout(retryTimers[id]);
+      delete retryTimers[id];
       pcs[id]?.close();
       delete pcs[id];
+      const video = videos[id];
+      if (video) video.srcObject = null;
     }
   };
 

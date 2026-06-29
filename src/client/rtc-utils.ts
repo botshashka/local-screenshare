@@ -122,6 +122,77 @@ export function startHeartbeat(
   };
 }
 
+// ── Peer-connection liveness ─────────────────────────────────────────────────
+// An RTCPeerConnection's `disconnected` state is a routinely *transient* ICE
+// flap: connectivity is momentarily lost but usually self-heals within a few
+// seconds with no renegotiation (the same track resumes). Only `failed` is
+// terminal. Tearing the slot down on `disconnected` is what makes a 1s network
+// blip pop the join/QR card and (worse) leaves a blank video, since a self-heal
+// to `connected` doesn't re-fire ontrack. This helper separates the two: it only
+// reports a real loss on `failed`, or on a `disconnected` that persists past a
+// grace window. Modeled on startHeartbeat (pure timer logic, easily unit-tested).
+export const DISCONNECT_GRACE_MS = 6000;
+
+// Feed pc.connectionState to update() on every change. onLost fires at most once
+// (until stop()) when the drop is judged real — the caller then tears down and
+// re-offers. Recovery to `connected` before the grace elapses is a no-op.
+export function trackConnectionLiveness(opts: { graceMs?: number; onLost: () => void }): {
+  update: (state: RTCPeerConnectionState) => void;
+  stop: () => void;
+} {
+  const graceMs = opts.graceMs ?? DISCONNECT_GRACE_MS;
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  let lost = false;
+  const clearGrace = (): void => {
+    if (graceTimer !== undefined) {
+      clearTimeout(graceTimer);
+      graceTimer = undefined;
+    }
+  };
+  const fire = (): void => {
+    if (lost) return;
+    lost = true;
+    clearGrace();
+    opts.onLost();
+  };
+  return {
+    update: (state: RTCPeerConnectionState): void => {
+      if (state === "connected") {
+        clearGrace();
+        return;
+      }
+      if (state === "failed") {
+        fire();
+        return;
+      }
+      if (state === "disconnected") {
+        // Could still self-heal — wait out the grace window before escalating,
+        // unless it's already running.
+        if (graceTimer === undefined && !lost) {
+          graceTimer = setTimeout(fire, graceMs);
+        }
+        return;
+      }
+      // "closed" / "new" / "connecting" — nothing pending to escalate.
+      clearGrace();
+    },
+    stop: (): void => {
+      lost = true; // make a post-stop grace fire impossible
+      clearGrace();
+    },
+  };
+}
+
+// Is a peer connection beyond saving, so an incoming (re)offer must build a fresh
+// one rather than reuse it? `failed`/`closed` are terminal; `disconnected` counts
+// here because by the time a recovery re-offer arrives we've already escalated
+// past the self-heal window (see trackConnectionLiveness) — reusing it would
+// answer on a dead transport and leave ontrack silent (blank video). A `new`,
+// `connecting`, or `connected` PC is reused for an ordinary renegotiation.
+export function isDeadConnectionState(state: RTCPeerConnectionState): boolean {
+  return state === "failed" || state === "closed" || state === "disconnected";
+}
+
 // ── Room codes ─────────────────────────────────────────────────────────────
 // A public hub is multi-tenant: one signaling room per code keeps each
 // household's signaling isolated, so the code is also the only access gate —
