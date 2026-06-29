@@ -270,7 +270,8 @@ export type ReceiverInMsg =
   | { type: "sender-connected"; id: string }
   | { type: "offer"; from: string; sdp: string }
   | { type: "ice-candidate"; from: string; candidate: RTCIceCandidateInit }
-  | { type: "peer-disconnected"; id: string };
+  | { type: "peer-disconnected"; id: string }
+  | { type: "stream-stopped"; from: string };
 
 // ── Quality presets (sender-side encode ceiling) ──────────────────────────
 export type QualityPreset = "performance" | "balanced" | "maximum";

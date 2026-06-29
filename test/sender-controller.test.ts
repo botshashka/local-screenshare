@@ -173,6 +173,7 @@ describe("senderControllerReduce — capture ended", () => {
     const s = connected();
     const { state, actions } = senderControllerReduce(s, { t: "capture-ended", gen: 1 });
     expect(actions).toEqual([
+      { t: "announce-stopped" },
       { t: "stop-capture", gen: 1 },
       { t: "detach-preview" },
       { t: "teardown-peer" },

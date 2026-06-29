@@ -516,6 +516,10 @@ function startSender(): void {
       case "teardown-peer":
         dispatch({ t: "peer-gone" });
         break;
+      case "announce-stopped":
+        if (myId)
+          ws?.send(JSON.stringify({ type: "stream-stopped", to: "receiver", from: myId }));
+        break;
       case "schedule-retry":
         if (!retryTimer)
           retryTimer = setTimeout(() => {

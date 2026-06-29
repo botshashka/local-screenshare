@@ -104,6 +104,8 @@ export type SenderControllerAction =
   | { t: "renegotiate" }
   // Adapter: dispatch peer-gone into senderReduce.
   | { t: "teardown-peer" }
+  // Adapter: tell the receiver we deliberately stopped, so it blanks at once.
+  | { t: "announce-stopped" }
   | { t: "schedule-retry" }
   | { t: "cancel-retry" };
 
@@ -189,6 +191,7 @@ export function senderControllerReduce(
       // Retire the ended capture (drop it from the adapter's map + stop any
       // sibling tracks), return the preview/button to idle, and tear the peer down.
       const actions: SenderControllerAction[] = [
+        { t: "announce-stopped" },
         { t: "stop-capture", gen: event.gen },
         { t: "detach-preview" },
         { t: "teardown-peer" },

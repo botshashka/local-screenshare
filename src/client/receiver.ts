@@ -17,6 +17,15 @@ import {
   type ReceiverEvent,
   type ReceiverAction,
 } from "./receiver-session.js";
+import {
+  receiverControllerReduce,
+  wantRoomCard,
+  roomCardEffect,
+  initialReceiverControllerState,
+  type ReceiverControllerState,
+  type ReceiverControllerEvent,
+  type ReceiverControllerAction,
+} from "./receiver-controller.js";
 
 // Vendored QR encoder (public/vendor/qrcode.js), loaded as a classic script
 // before this module so it's a global. Typed minimally for the bits we use.
@@ -126,8 +135,36 @@ const videos: Record<string, HTMLVideoElement> = {
 
 const pcs: Record<string, RTCPeerConnection> = {};
 const retryTimers: Record<string, ReturnType<typeof setTimeout>> = {};
+// Per-sender post-connected "reveal anyway" fallback timers.
+const revealFallbackTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 // Per-sender connection-liveness watchers (transient-flap vs. real-loss arbiter).
 const livenessWatchers: Record<string, ReturnType<typeof trackConnectionLiveness>> = {};
+// How long after a real loss before asking the sender to re-offer.
+const RETRY_MS = 2000;
+
+// The pure per-slot media controller (srcObject lifecycle, reveal latch,
+// liveness/retry, room-card visibility). The adapter feeds it gen-tagged events
+// and applies its actions; see dispatchRx / applyRxCtl below.
+let rxCtl: ReceiverControllerState = initialReceiverControllerState;
+
+// Autoplay policy. A freshly (re)loaded TV page has no user activation, so an
+// UNMUTED <video> is refused play() (NotAllowedError) and the slot sits gray —
+// the TV-reload bug. We start every video MUTED (muted playback is always
+// allowed, so video is never gray) and unmute on the first real user gesture
+// (remote keypress / click / touch), after which audio plays too. mousemove is
+// NOT a gesture for autoplay, so it can't be used here.
+let userInteracted = false;
+const GESTURES = ["pointerdown", "keydown", "touchstart"] as const;
+function onFirstGesture(): void {
+  if (userInteracted) return;
+  userInteracted = true;
+  for (const evt of GESTURES) document.removeEventListener(evt, onFirstGesture);
+  for (const v of Object.values(videos)) {
+    v.muted = false;
+    void v.play().catch(() => {});
+  }
+}
+for (const evt of GESTURES) document.addEventListener(evt, onFirstGesture);
 
 // ── Room ─────────────────────────────────────────────────────────────────────
 // Rooms exist only to isolate tenants on a shared public hub. A co-located
@@ -256,31 +293,32 @@ function showRoomPanel(show: boolean): void {
   document.body.classList.toggle("joining", show);
 }
 
-function updateRoomPanel(): void {
+// Derived, EDGE-triggered room-card visibility. `wantRoomCard` is a pure function
+// of the controller's per-slot `revealed` latches; we act only when the desired
+// state CHANGES, never re-arming the grace timer on an unchanged level (doing that
+// on every event would reset the timer forever and the card would never appear).
+// Hiding is immediate; showing waits out the grace window (re-checked on fire) so
+// a brief (re)connect can't flash the card. Because `revealed` persists across a
+// rebuild, the card stays hidden through a re-share/reconnect.
+let prevWantCard: boolean | null = null;
+function applyRoomPanel(): void {
   if (!roomPanel) return;
+  const want = wantRoomCard(rxCtl, hubConfigured);
+  const effect = roomCardEffect(prevWantCard, want);
+  if (effect === "none") return;
+  prevWantCard = want;
   clearTimeout(roomPanelGraceTimer);
   roomPanelGraceTimer = undefined;
-  if (!hubConfigured) {
-    // Local single-hub server: no join screen. Keep the card hidden and reveal
-    // the TV chrome (body starts in `joining` to avoid a first-paint flash).
+  if (effect === "hide-now") {
     showRoomPanel(false);
     return;
   }
-  const anyConnected = Object.values(slots).some((s) => s.classList.contains("connected"));
-  if (anyConnected) {
-    showRoomPanel(false);
-    return;
-  }
-  // Nothing connected — wait out the grace window before revealing the card, in
-  // case a device is mid-(re)connect. Re-check on fire, since a connection may
-  // have landed during the wait.
   roomPanelGraceTimer = setTimeout(() => {
     roomPanelGraceTimer = undefined;
-    const stillNone = !Object.values(slots).some((s) => s.classList.contains("connected"));
-    if (stillNone) showRoomPanel(true);
+    if (wantRoomCard(rxCtl, hubConfigured)) showRoomPanel(true);
   }, ROOM_PANEL_GRACE_MS);
 }
-updateRoomPanel();
+applyRoomPanel();
 
 const currentLayout = LAYOUTS[layoutIdx];
 if (currentLayout) document.body.classList.add(currentLayout.cls);
@@ -365,38 +403,27 @@ function toggleSecondary(): void {
   applyByCls(cls.startsWith("pip") ? `solo-${dev}` : `pip-${dev}`);
 }
 
-// Mark a slot's stream as not-currently-live: drop the `connected` class and let
-// the room panel reconsider showing the join card.
-//
-// INVARIANT — do not clear `video.srcObject` here, and do not let any
-// transient/recoverable drop reach a place that does. This rests on a browser
-// semantic that no test in this repo can verify (a fake PC would just assume it):
-// when ICE self-heals from `disconnected` back to `connected`, the *same* track
-// resumes and `ontrack` does NOT fire again. So nulling the source on a flap
-// would leave the slot permanently blank until a page reload — the original bug.
-// We instead keep the last frame (it freezes, then unfreezes on heal). The source
-// is nulled in exactly one place: the `peer-disconnected` handler, where the hub
-// has told us the sender truly left and a fresh `ontrack` is coming via rebuild.
-// If you change this, re-verify in real Chrome via the DevTools offline toggle.
+// DOM handlers for the controller's reveal-slot / mark-disconnected actions. The
+// srcObject INVARIANT is now enforced by the controller, not by a comment here:
+// the source is nulled in exactly ONE place (the `null-srcobject` action, emitted
+// only by peer-disconnected) and reset only on a rebuild (`reset-srcobject`, emitted
+// only by offer-arrived). A transient flap never reaches either — the controller
+// keeps the last frame (it freezes, then unfreezes on heal). The provenance tests
+// in receiver-controller.test.ts prove this; re-verify the browser semantic itself
+// in real Chrome via the DevTools offline toggle.
 function markDisconnected(id: string): void {
   const slot = slots[id];
   if (slot) {
     slot.classList.remove("connected");
     slot.classList.add("disconnected");
   }
-  updateRoomPanel();
 }
 
-// Mark a slot live and hide the join panel. Normally fired on the first decoded
-// frame; also used as a fallback once the peer connection reports `connected`,
-// so a stream that never decodes a frame can't leave the join card stuck over a
-// live connection.
 function revealSlot(id: string): void {
   const slot = slots[id];
   if (!slot) return;
   slot.classList.remove("disconnected");
   slot.classList.add("connected");
-  updateRoomPanel();
 }
 
 layoutBtn?.addEventListener("click", cycleLayout);
@@ -454,57 +481,45 @@ setTimeout(() => {
   setTimeout(() => hint.classList.remove("show"), 3500);
 }, 800);
 
-function createPC(senderId: string): RTCPeerConnection {
+// Build the RTCPeerConnection for a slot and wire its media closures to the
+// controller, all tagged with this rebuild's `gen` (the negotiation epoch) so a
+// superseded PC's late callbacks are dropped. offer-arrived runs first: it resets
+// the <video> to a fresh stream (synchronously, before ontrack can fire) and
+// re-bases the slot's generation.
+function createPC(senderId: string, gen: number): RTCPeerConnection {
   pcs[senderId]?.close();
-  livenessWatchers[senderId]?.stop();
-
-  // A fresh PC for this slot means a fresh stream: drop any stale/ended tracks
-  // from a prior connection so the rebuild's ontrack starts clean (ontrack below
-  // appends into this). Harmless on the first-ever connection (was null).
-  const video = videos[senderId];
-  if (video) video.srcObject = new MediaStream();
+  dispatchRx({ t: "offer-arrived", id: senderId, gen });
 
   const pc = new RTCPeerConnection(STUN);
   pcs[senderId] = pc;
 
-  // Decide transient flap vs. real loss: only escalate (tear the slot down and
-  // re-offer) on a `failed`, or a `disconnected` that doesn't self-heal in time.
+  // Arbitrate transient flap vs. real loss; only a real loss escalates.
   const watcher = trackConnectionLiveness({
     onLost: () => {
       if (pcs[senderId] !== pc) return; // superseded by a newer PC
-      markDisconnected(senderId);
-      if (!retryTimers[senderId]) {
-        retryTimers[senderId] = setTimeout(() => {
-          delete retryTimers[senderId];
-          if (pcs[senderId] === pc && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "request-reoffers", to: senderId }));
-          }
-        }, 2000);
-      }
+      dispatchRx({ t: "liveness-lost", id: senderId, gen });
     },
   });
   livenessWatchers[senderId] = watcher;
 
   pc.ontrack = (e) => {
     const video = videos[senderId];
-    if (!video) return;
-    if (!video.srcObject) video.srcObject = new MediaStream();
+    // Drop a stale PC's track, and NEVER recreate a nulled srcObject (the H3
+    // invariant): after offer-arrived's reset-srcobject, srcObject is a fresh
+    // non-null stream before any track arrives, so null here means the slot was
+    // torn down by peer-disconnected and must stay torn down.
+    if (!video || pcs[senderId] !== pc || !video.srcObject) return;
     (video.srcObject as MediaStream).addTrack(e.track);
-    video.muted = false;
-    if (!slots[senderId]) return;
-    // Keep the video hidden until the first frame is actually decoded.
-    // Revealing it the moment a track arrives shows the browser's native
-    // play-button placeholder for ~0.5s while it waits for frames.
+    // Muted until the user has interacted, so play() is never refused (the gray-
+    // screen cause); onFirstGesture unmutes once activation exists.
+    video.muted = !userInteracted;
+    void video.play().catch(() => {});
     const rvfc = (
-      video as HTMLVideoElement & {
-        requestVideoFrameCallback?: (cb: () => void) => void;
-      }
+      video as HTMLVideoElement & { requestVideoFrameCallback?: (cb: () => void) => void }
     ).requestVideoFrameCallback;
-    if (rvfc) {
-      rvfc.call(video, () => revealSlot(senderId));
-    } else {
-      video.addEventListener("playing", () => revealSlot(senderId), { once: true });
-    }
+    const onFrame = (): void => dispatchRx({ t: "frame-decoded", id: senderId, gen });
+    if (rvfc) rvfc.call(video, onFrame);
+    else video.addEventListener("playing", onFrame, { once: true });
   };
 
   pc.onicecandidate = ({ candidate }) => {
@@ -513,23 +528,12 @@ function createPC(senderId: string): RTCPeerConnection {
   };
 
   pc.onconnectionstatechange = () => {
-    // The watcher arbitrates disconnect/failed → its onLost does the teardown.
+    // The watcher arbitrates disconnect/failed → its onLost is the real-loss path.
     watcher.update(pc.connectionState);
-    if (pc.connectionState === "connected") {
-      clearTimeout(retryTimers[senderId]);
-      delete retryTimers[senderId];
-      pc.getReceivers().forEach((r) => {
-        if ("jitterBufferTarget" in r)
-          (r as RTCRtpReceiver & { jitterBufferTarget: number }).jitterBufferTarget = 50;
-      });
-      // Fallback for a connected-but-never-decoding stream: the first-frame
-      // reveal above is the normal path, but if no frame arrives within the
-      // grace window, reveal anyway so the join card doesn't sit over a live
-      // connection. revealSlot is idempotent, so a frame landing first wins.
-      setTimeout(() => {
-        if (pcs[senderId] === pc && pc.connectionState === "connected") revealSlot(senderId);
-      }, REVEAL_FALLBACK_MS);
-    }
+    const state = pc.connectionState;
+    // "closed" is self-induced (our own pc.close()) — don't forward it.
+    if (state === "closed") return;
+    dispatchRx({ t: "connection-changed", id: senderId, gen, state });
   };
 
   return pc;
@@ -554,7 +558,7 @@ function applyReceiver(action: ReceiverAction): void {
   switch (action.t) {
     case "create-pc": {
       negEpoch[action.id] = action.epoch;
-      const pc = createPC(action.id);
+      const pc = createPC(action.id, action.epoch);
       // Answerer side: declare the directions we expect so the rebuilt PC lines up
       // with the offer's m-lines (mirrors the original sender-connected setup).
       pc.addTransceiver("video", { direction: "recvonly" });
@@ -593,6 +597,87 @@ function applyReceiver(action: ReceiverAction): void {
       break;
     }
   }
+}
+
+// ── Receiver media lifecycle: pure controller + thin adapter ─────────────────
+// Per-slot srcObject / reveal / liveness / retry policy lives in the controller;
+// this adapter performs the real MediaStream / DOM / timer I/O it asks for and
+// re-derives the room-card visibility after every step.
+function dispatchRx(event: ReceiverControllerEvent): void {
+  const { state, actions } = receiverControllerReduce(rxCtl, event);
+  rxCtl = state;
+  for (const action of actions) applyRxCtl(action);
+  applyRoomPanel();
+}
+
+function applyRxCtl(action: ReceiverControllerAction): void {
+  switch (action.t) {
+    case "reset-srcobject": {
+      // The ONE place a fresh stream is set (a rebuild). Runs before the new PC's
+      // ontrack, so the element always has a non-null stream to append into.
+      const video = videos[action.id];
+      if (video) video.srcObject = new MediaStream();
+      break;
+    }
+    case "null-srcobject": {
+      // The ONE place the source is nulled — the sender truly left.
+      const video = videos[action.id];
+      if (video) video.srcObject = null;
+      break;
+    }
+    case "reveal-slot":
+      revealSlot(action.id);
+      break;
+    case "mark-disconnected":
+      markDisconnected(action.id);
+      break;
+    case "schedule-reveal-fallback": {
+      clearTimeout(revealFallbackTimers[action.id]);
+      const { id, gen } = action;
+      revealFallbackTimers[id] = setTimeout(() => {
+        delete revealFallbackTimers[id];
+        dispatchRx({ t: "reveal-fallback-fired", id, gen });
+      }, REVEAL_FALLBACK_MS);
+      break;
+    }
+    case "tune-receivers": {
+      pcs[action.id]?.getReceivers().forEach((r) => {
+        if ("jitterBufferTarget" in r)
+          (r as RTCRtpReceiver & { jitterBufferTarget: number }).jitterBufferTarget = 50;
+      });
+      break;
+    }
+    case "request-reoffer":
+      if (ws.readyState === WebSocket.OPEN)
+        ws.send(JSON.stringify({ type: "request-reoffers", to: action.id }));
+      break;
+    case "schedule-retry": {
+      clearTimeout(retryTimers[action.id]);
+      const { id, gen } = action;
+      retryTimers[id] = setTimeout(() => {
+        delete retryTimers[id];
+        dispatchRx({ t: "retry-fired", id, gen });
+      }, RETRY_MS);
+      break;
+    }
+    case "cancel-retry":
+      clearTimeout(retryTimers[action.id]);
+      delete retryTimers[action.id];
+      break;
+    case "stop-liveness":
+      livenessWatchers[action.id]?.stop();
+      delete livenessWatchers[action.id];
+      break;
+  }
+}
+
+// Tear a slot's media down (controller nulls the source, marks disconnected,
+// stops the liveness watcher, cancels any retry) and drop its PC. A future offer
+// rebuilds it.
+function tearDownSlot(id: string): void {
+  dispatchRx({ t: "peer-disconnected", id });
+  pcs[id]?.close();
+  delete pcs[id];
 }
 
 // Signaling doesn't depend on UI init: the DOM lookups above are guarded so
@@ -642,21 +727,14 @@ function connectWS(): void {
       dispatch({ t: "ice", id: msg.from, candidate: msg.candidate });
     }
 
-    if (msg.type === "peer-disconnected") {
-      // The hub says this sender has genuinely left — no rebuild is coming, so
-      // tear the slot fully down and clear the video (the one place we null the
-      // source; a mere ICE flap must not reach here).
-      const { id } = msg;
-      markDisconnected(id);
-      livenessWatchers[id]?.stop();
-      delete livenessWatchers[id];
-      clearTimeout(retryTimers[id]);
-      delete retryTimers[id];
-      pcs[id]?.close();
-      delete pcs[id];
-      const video = videos[id];
-      if (video) video.srcObject = null;
-    }
+    // Two ways a stream genuinely ends (vs a transient flap, which the liveness
+    // arbiter keeps showing): the hub says the sender's socket left
+    // (peer-disconnected), or the sender tells us it deliberately stopped sharing
+    // (stream-stopped) — the latter blanks the slot instantly instead of waiting
+    // out the liveness/heartbeat timeout. Both tear the slot's media down; a future
+    // offer rebuilds it.
+    if (msg.type === "peer-disconnected") tearDownSlot(msg.id);
+    if (msg.type === "stream-stopped") tearDownSlot(msg.from);
   };
 
   ws.onclose = () => {
