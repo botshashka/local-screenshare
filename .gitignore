@@ -1,5 +1,13 @@
+# Dependencies
 node_modules/
-.certs/
+
+# Build output
 dist/
 public/js/
+
+# Generated certs & tooling state
+.certs/
 .wrangler/
+
+# Machine-local (never committed)
+.local/

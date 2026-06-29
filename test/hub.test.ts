@@ -144,311 +144,96 @@ async function expectNo(client: TestClient, type: string): Promise<void> {
   await expect(client.next(type, 200)).rejects.toThrow(/timeout/);
 }
 
-describe("hub slot assignment", () => {
-  it("assigns device-a then device-b by arrival order", async () => {
-    const a = await connect();
-    a.send({ type: "register", role: "sender" });
-    expect((await a.next("assigned")).id).toBe("device-a");
+// These are the Node `ws` *adapter* smoke tests: they prove createHub() correctly
+// wires the shared core (src/core/room.ts) to real sockets and translates its ops
+// — register/assigned, relay, close→peer-disconnected, the clients projection, and
+// the one thing the pure core suite can't assert: a reap is a hard terminate
+// (1006), not a graceful close. The exhaustive slot/claim/relay/liveness logic
+// lives in test/core/room.test.ts.
 
-    const b = await connect();
-    b.send({ type: "register", role: "sender" });
-    expect((await b.next("assigned")).id).toBe("device-b");
-
-    expect(hub.clients.get("device-a")).toBe(a.server);
-    expect(hub.clients.get("device-b")).toBe(b.server);
+describe("node adapter — pairing and relay", () => {
+  it("registers a sender and replies assigned", async () => {
+    const sender = await connect();
+    sender.send({ type: "register", role: "sender" });
+    expect((await sender.next("assigned")).id).toBe("device-a");
   });
 
-  it("honors a free prefer hint", async () => {
-    const a = await connect();
-    a.send({ type: "register", role: "sender", prefer: "device-b" });
-    expect((await a.next("assigned")).id).toBe("device-b");
-  });
-
-  it("turns a fresh third sender away with room-full (no stealing)", async () => {
-    for (const _ of SENDER_IDS) {
-      const s = await connect();
-      s.send({ type: "register", role: "sender" });
-      await s.next("assigned");
-    }
-    const third = await connect();
-    third.send({ type: "register", role: "sender" });
-    expect((await third.next()).type).toBe("room-full");
-  });
-});
-
-describe("prefer reclaim (the 'no Share button' ghost bug)", () => {
-  it("reclaims a slot still held by a ghost instead of returning room-full", async () => {
-    // device-a genuinely connected; device-b held by a socket we leave open to
-    // play the ghost (a half-open reload that hasn't closed yet).
-    const a = await connect();
-    a.send({ type: "register", role: "sender" });
-    await a.next("assigned");
-
-    const ghost = await connect();
-    ghost.send({ type: "register", role: "sender" });
-    expect((await ghost.next("assigned")).id).toBe("device-b");
-
-    // The reloaded device reconnects preferring its old slot. Without reclaim it
-    // would hit room-full (both slots look taken); with it, it gets device-b.
-    const reconnect = await connect();
-    reconnect.send({ type: "register", role: "sender", prefer: "device-b" });
-    expect((await reconnect.next("assigned")).id).toBe("device-b");
-
-    // The ghost socket is evicted, and the slot now points at the new socket.
-    expect((await ghost.closed()).code).toBe(1000);
-    expect(hub.clients.get("device-b")).toBe(reconnect.server);
-  });
-
-  it("does not grab a different free-looking slot when reclaiming", async () => {
-    const ghost = await connect();
-    ghost.send({ type: "register", role: "sender" });
-    expect((await ghost.next("assigned")).id).toBe("device-a");
-
-    // device-b is free, but a prefer:device-a reconnect must reclaim a, not hop.
-    const reconnect = await connect();
-    reconnect.send({ type: "register", role: "sender", prefer: "device-a" });
-    expect((await reconnect.next("assigned")).id).toBe("device-a");
-    expect((await ghost.closed()).code).toBe(1000);
-  });
-});
-
-describe("token-gated reclaim (the two-tab 3s livelock)", () => {
-  it("a different live device cannot evict a slot it also prefers", async () => {
-    // device-a is held by a live tab. A *second* tab that also prefers device-a
-    // (e.g. it once held that slot, so its client keeps preferring it) must NOT
-    // evict the live one — that ping-pong is the 3s reconnect loop. It slots in
-    // beside, on device-b.
-    const a = await connect();
-    a.send({ type: "register", role: "sender", token: "tab-1" });
-    expect((await a.next("assigned")).id).toBe("device-a");
-
-    const b = await connect();
-    b.send({ type: "register", role: "sender", prefer: "device-a", token: "tab-2" });
-    expect((await b.next("assigned")).id).toBe("device-b");
-
-    // The live tab keeps its slot and its socket — no eviction took place.
-    expect(hub.clients.get("device-a")).toBe(a.server);
-    expect(hub.clients.get("device-b")).toBe(b.server);
-  });
-
-  it("a full room of distinct devices turns a third away, not evicts one", async () => {
-    const a = await connect();
-    a.send({ type: "register", role: "sender", token: "tab-1" });
-    await a.next("assigned");
-    const b = await connect();
-    b.send({ type: "register", role: "sender", token: "tab-2" });
-    await b.next("assigned");
-
-    const third = await connect();
-    third.send({ type: "register", role: "sender", prefer: "device-a", token: "tab-3" });
-    expect((await third.next()).type).toBe("room-full");
-    // Both incumbents survive.
-    expect(hub.clients.get("device-a")).toBe(a.server);
-    expect(hub.clients.get("device-b")).toBe(b.server);
-  });
-
-  it("still reclaims its own ghost when the token matches", async () => {
-    // The legitimate reclaim: the same tab (same token) reconnecting over its
-    // own half-open socket gets its slot back instead of being turned away.
-    const ghost = await connect();
-    ghost.send({ type: "register", role: "sender", token: "tab-1" });
-    expect((await ghost.next("assigned")).id).toBe("device-a");
-
-    const reconnect = await connect();
-    reconnect.send({ type: "register", role: "sender", prefer: "device-a", token: "tab-1" });
-    expect((await reconnect.next("assigned")).id).toBe("device-a");
-    expect((await ghost.closed()).code).toBe(1000);
-    expect(hub.clients.get("device-a")).toBe(reconnect.server);
-  });
-
-  it("a socket re-registering to a different slot frees the one it held", async () => {
-    // The same socket registers as device-a, then re-registers preferring the
-    // now-free device-b. It must end up mapped to device-b ONLY — never left
-    // holding both slots (which would make `to`-routing ambiguous and falsely
-    // report the room full to a real third device).
-    const a = await connect();
-    a.send({ type: "register", role: "sender", token: "tab-1" });
-    expect((await a.next("assigned")).id).toBe("device-a");
-
-    a.send({ type: "register", role: "sender", prefer: "device-b", token: "tab-1" });
-    expect((await a.next("assigned")).id).toBe("device-b");
-
-    expect(hub.clients.get("device-b")).toBe(a.server);
-    expect(hub.clients.has("device-a")).toBe(false);
-  });
-});
-
-describe("close guard", () => {
-  it("a replaced ghost's later close does not evict its successor", async () => {
-    const receiver = await connect();
-    receiver.send({ type: "register", role: "receiver" });
-
-    const ghost = await connect();
-    ghost.send({ type: "register", role: "sender" }); // device-a
-    await ghost.next("assigned");
-    await receiver.next("sender-connected");
-
-    // Reclaim device-a with a new socket; the hub closes the ghost.
-    const reconnect = await connect();
-    reconnect.send({ type: "register", role: "sender", prefer: "device-a" });
-    await reconnect.next("assigned");
-    await receiver.next("sender-connected"); // re-paired against the new socket
-    await ghost.closed();
-
-    // The ghost's close must be a no-op: the slot still points at the successor,
-    // and the receiver must NOT be told device-a disconnected.
-    expect(hub.clients.get("device-a")).toBe(reconnect.server);
-    await expectNo(receiver, "peer-disconnected");
-  });
-});
-
-describe("pairing and relay", () => {
-  it("pairs a sender that arrives before the receiver", async () => {
+  it("projects clients to the server socket holding each slot", async () => {
     const sender = await connect();
     sender.send({ type: "register", role: "sender" });
     await sender.next("assigned");
-
-    const receiver = await connect();
-    receiver.send({ type: "register", role: "receiver" });
-
-    expect((await receiver.next("sender-connected")).id).toBe("device-a");
-    expect((await sender.next()).type).toBe("receiver-ready");
+    expect(hub.clients.get("device-a")).toBe(sender.server);
   });
 
-  it("relays an addressed frame, stamping from with the sender's registered id", async () => {
-    const receiver = await connect();
-    receiver.send({ type: "register", role: "receiver" });
+  it("relays an addressed frame, stamping from with the registered id (spoof ignored)", async () => {
     const sender = await connect();
     sender.send({ type: "register", role: "sender" });
-    await sender.next("receiver-ready");
+    await sender.next("assigned");
+    const receiver = await connect();
+    receiver.send({ type: "register", role: "receiver" });
     await receiver.next("sender-connected");
 
-    // Even a spoofed `from` is overwritten with the connection's own id — the
-    // hub never trusts a client-supplied `from` on a public relay.
-    sender.send({ type: "offer", to: "receiver", from: "receiver", sdp: "v=0..." });
+    sender.send({ type: "offer", to: "receiver", from: "device-b", sdp: "SDP" });
     const offer = await receiver.next("offer");
-    expect(offer.sdp).toBe("v=0...");
     expect(offer.from).toBe("device-a");
-  });
-
-  it("drops a relay frame from a socket that hasn't registered", async () => {
-    const receiver = await connect();
-    receiver.send({ type: "register", role: "receiver" });
-    const stranger = await connect(); // never registers
-    stranger.send({ type: "offer", to: "receiver", sdp: "x" });
-    await expectNo(receiver, "offer");
-  });
-
-  it("drops an addressed frame when the target is absent", async () => {
-    const sender = await connect();
-    sender.send({ type: "register", role: "sender" });
-    await sender.next("assigned");
-    // No receiver registered; this must not throw or echo back.
-    sender.send({ type: "offer", to: "receiver", sdp: "x" });
-    await expectNo(sender, "offer");
+    expect(offer.sdp).toBe("SDP");
   });
 });
 
-describe("disconnect", () => {
-  it("notifies the receiver when a sender drops", async () => {
-    const receiver = await connect();
-    receiver.send({ type: "register", role: "receiver" });
-    const sender = await connect();
-    sender.send({ type: "register", role: "sender" });
-    await sender.next("assigned");
-    await receiver.next("sender-connected");
-
-    sender.raw.close();
-    expect((await receiver.next("peer-disconnected")).id).toBe("device-a");
-    expect(hub.clients.has("device-a")).toBe(false);
-  });
-
-  it("notifies live senders when the receiver drops", async () => {
-    const receiver = await connect();
-    receiver.send({ type: "register", role: "receiver" });
-    const sender = await connect();
-    sender.send({ type: "register", role: "sender" });
-    await sender.next("receiver-ready");
-
-    receiver.raw.close();
-    expect((await sender.next("peer-disconnected")).id).toBe("receiver");
-  });
-});
-
-describe("liveness heartbeat", () => {
+describe("node adapter — disconnect & liveness", () => {
   it("replies to a ping with a pong", async () => {
     const c = await connect();
     c.send({ type: "ping" });
     expect((await c.next()).type).toBe("pong");
   });
 
-  it("leaves a just-connected socket alone on sweep (now)", async () => {
+  it("tells the peer when a socket closes", async () => {
     const sender = await connect();
     sender.send({ type: "register", role: "sender" });
     await sender.next("assigned");
-    hub.sweep(); // real now — nothing is stale yet
+    const receiver = await connect();
+    receiver.send({ type: "register", role: "receiver" });
+    await receiver.next("sender-connected");
+
+    sender.raw.close();
+    expect((await receiver.next("peer-disconnected")).id).toBe("device-a");
+  });
+
+  it("a replaced ghost's later close does not evict its successor", async () => {
+    // Same-token reclaim replaces the ghost; the core nulls the ghost's attachment
+    // before closing it, so the adapter's close handler treats it as unregistered.
+    const receiver = await connect();
+    receiver.send({ type: "register", role: "receiver" });
+    const ghost = await connect();
+    ghost.send({ type: "register", role: "sender", prefer: "device-a", token: "tab" });
+    await ghost.next("assigned");
+    await receiver.next("sender-connected");
+
+    const fresh = await connect();
+    fresh.send({ type: "register", role: "sender", prefer: "device-a", token: "tab" });
+    expect((await fresh.next("assigned")).id).toBe("device-a");
+    await ghost.closed(); // the replaced socket is closed…
+    await expectNo(receiver, "peer-disconnected"); // …but its close is a no-op
+    expect(hub.clients.get("device-a")).toBe(fresh.server);
+  });
+
+  it("the interval sweep reaps a silent socket and frees its slot", async () => {
+    await boot(50); // short liveness window
+    const sender = await connect();
+    sender.send({ type: "register", role: "sender" });
+    await sender.next("assigned");
+    await sleep(120); // now older than the window
+    hub.sweep();
+    expect(hub.clients.has("device-a")).toBe(false);
+    expect((await sender.closed()).code).toBe(1006); // terminated, not graceful
+  });
+
+  it("leaves a just-connected socket alone on sweep", async () => {
+    const sender = await connect();
+    sender.send({ type: "register", role: "sender" });
+    await sender.next("assigned");
+    hub.sweep();
     expect(hub.clients.has("device-a")).toBe(true);
   });
-
-  it("reaps a silent socket and tells its peer it disconnected", async () => {
-    await boot(50);
-    const receiver = await connect();
-    receiver.send({ type: "register", role: "receiver" });
-    const sender = await connect();
-    sender.send({ type: "register", role: "sender" });
-    await sender.next("assigned");
-    await receiver.next("sender-connected");
-
-    await sleep(120); // the sender goes silent past the window…
-    await receiver.ping(); // …the receiver stays alive to observe the eviction
-    hub.sweep();
-
-    expect((await receiver.next("peer-disconnected")).id).toBe("device-a");
-    expect(hub.clients.has("device-a")).toBe(false);
-    await sender.closed(); // terminated (1006), not a graceful close
-  });
-
-  it("reaps only the silent socket, sparing one that just pinged", async () => {
-    await boot(50); // short liveness window
-    const receiver = await connect();
-    receiver.send({ type: "register", role: "receiver" });
-    const live = await connect();
-    live.send({ type: "register", role: "sender" }); // device-a, stays active
-    await live.next("assigned");
-    const ghost = await connect();
-    ghost.send({ type: "register", role: "sender", prefer: "device-b" });
-    await ghost.next("assigned");
-    await receiver.next("sender-connected");
-    await receiver.next("sender-connected");
-
-    await sleep(120); // both senders now older than the 50ms window…
-    await live.ping(); // …but this one refreshes via a ping round-trip
-    await receiver.ping();
-    hub.sweep();
-
-    expect(hub.clients.has("device-a")).toBe(true); // the active one survives
-    expect(hub.clients.has("device-b")).toBe(false); // the ghost is reaped
-    expect((await receiver.next("peer-disconnected")).id).toBe("device-b");
-  });
-
-  it("a fresh sender reclaims a slot once the ghost holding it times out", async () => {
-    await boot(50);
-    const a = await connect();
-    a.send({ type: "register", role: "sender" }); // device-a, kept alive
-    await a.next("assigned");
-    const ghost = await connect();
-    ghost.send({ type: "register", role: "sender", prefer: "device-b" });
-    await ghost.next("assigned");
-
-    await sleep(120);
-    await a.ping(); // a is still here
-
-    // A genuinely new device (no prefer) registers. The sweep on register reaps
-    // the timed-out ghost, freeing device-b for it — the exact "no Share button"
-    // recovery: a fresh sender gets in instead of a permanent room-full.
-    const fresh = await connect();
-    fresh.send({ type: "register", role: "sender" });
-    expect((await fresh.next("assigned")).id).toBe("device-b");
-    await ghost.closed(); // the timed-out ghost was terminated
-  });
 });
+

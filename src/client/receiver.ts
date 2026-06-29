@@ -5,13 +5,18 @@ import {
   generateRoomCode,
   coerceRoomCode,
   persistRoomInUrl,
-  tweakSdp,
   startHeartbeat,
   trackConnectionLiveness,
-  isDeadConnectionState,
   type ResTarget,
   type ReceiverInMsg,
 } from "./rtc-utils.js";
+import {
+  receiverReduce,
+  initialReceiverState,
+  type ReceiverState,
+  type ReceiverEvent,
+  type ReceiverAction,
+} from "./receiver-session.js";
 
 // Vendored QR encoder (public/vendor/qrcode.js), loaded as a classic script
 // before this module so it's a global. Typed minimally for the bits we use.
@@ -530,6 +535,66 @@ function createPC(senderId: string): RTCPeerConnection {
   return pc;
 }
 
+// ── Receiver negotiation: pure reducer + thin adapter ───────────────────────
+// All offer/answer/ICE decisions live in receiverReduce (pure, unit-tested). This
+// adapter just performs the real RTCPeerConnection I/O the reducer asks for and
+// feeds the async results back as events. negEpoch[id] records the live PC
+// generation per slot so a result from a superseded negotiation (a newer offer
+// arrived first) can't be applied to the wrong PC.
+let rxSession: ReceiverState = initialReceiverState;
+const negEpoch: Record<string, number> = {};
+
+function dispatch(event: ReceiverEvent): void {
+  const { state, actions } = receiverReduce(rxSession, event);
+  rxSession = state;
+  for (const action of actions) applyReceiver(action);
+}
+
+function applyReceiver(action: ReceiverAction): void {
+  switch (action.t) {
+    case "create-pc": {
+      negEpoch[action.id] = action.epoch;
+      const pc = createPC(action.id);
+      // Answerer side: declare the directions we expect so the rebuilt PC lines up
+      // with the offer's m-lines (mirrors the original sender-connected setup).
+      pc.addTransceiver("video", { direction: "recvonly" });
+      pc.addTransceiver("audio", { direction: "recvonly" });
+      break;
+    }
+    case "set-remote": {
+      const pc = pcs[action.id];
+      if (!pc || negEpoch[action.id] !== action.epoch) break;
+      pc.setRemoteDescription(new RTCSessionDescription({ type: "offer", sdp: action.sdp }))
+        .then(() => dispatch({ t: "remote-set", id: action.id, epoch: action.epoch }))
+        .catch(() => dispatch({ t: "op-failed", id: action.id, epoch: action.epoch, op: "remote" }));
+      break;
+    }
+    case "create-answer": {
+      const pc = pcs[action.id];
+      if (!pc || negEpoch[action.id] !== action.epoch) break;
+      pc.createAnswer()
+        .then(async (answer) => {
+          await pc.setLocalDescription(answer);
+          dispatch({ t: "answer-created", id: action.id, epoch: action.epoch, sdp: answer.sdp ?? "" });
+        })
+        .catch(() => dispatch({ t: "op-failed", id: action.id, epoch: action.epoch, op: "answer" }));
+      break;
+    }
+    case "send-answer": {
+      if (ws.readyState === WebSocket.OPEN)
+        ws.send(JSON.stringify({ type: "answer", to: action.id, from: "receiver", sdp: action.sdp }));
+      break;
+    }
+    case "add-ice": {
+      const pc = pcs[action.id];
+      if (!pc || negEpoch[action.id] !== action.epoch) break;
+      // A single rejected candidate must not tear the session down — swallow it.
+      pc.addIceCandidate(new RTCIceCandidate(action.candidate)).catch(() => {});
+      break;
+    }
+  }
+}
+
 // Signaling doesn't depend on UI init: the DOM lookups above are guarded so
 // module init always reaches this call and the socket always opens.
 function connectWS(): void {
@@ -548,7 +613,7 @@ function connectWS(): void {
     ws.send(JSON.stringify({ type: "register", id: "receiver" }));
   };
 
-  ws.onmessage = async (e: MessageEvent<string>) => {
+  ws.onmessage = (e: MessageEvent<string>) => {
     hb.alive();
     let msg: ReceiverInMsg;
     try {
@@ -558,43 +623,23 @@ function connectWS(): void {
     }
 
     if (msg.type === "sender-connected") {
-      // Idempotent: a late/duplicate sender-connected must not recreate (and so
-      // close, via createPC) a peer connection an earlier offer already set up.
-      if (!pcs[msg.id]) {
-        const pc = createPC(msg.id);
-        pc.addTransceiver("video", { direction: "recvonly" });
-        pc.addTransceiver("audio", { direction: "recvonly" });
-      }
+      // No speculative PC here: the reducer builds (and rebuilds) the peer
+      // connection when the offer arrives, with the recvonly transceivers — so a
+      // pre-created one would just be closed and replaced. Sending the initial
+      // res-hint now lets the sender encode to this slot's size from its first
+      // frame. Idempotent, so a late/duplicate sender-connected is harmless.
       sendResHints(msg.id);
     }
 
     if (msg.type === "offer") {
-      const senderId = msg.from;
-      // A recovery re-offer arrives on a dead PC (the sender rebuilt after a real
-      // loss); reusing it would leave ontrack silent and the video blank. Build a
-      // fresh PC in that case so ontrack re-fires and repopulates the slot; reuse
-      // a healthy PC for an ordinary renegotiation (e.g. a res-hint re-offer).
-      const existing = pcs[senderId];
-      const pc =
-        !existing || isDeadConnectionState(existing.connectionState)
-          ? createPC(senderId)
-          : existing;
-      await pc.setRemoteDescription(new RTCSessionDescription({ type: "offer", sdp: msg.sdp }));
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      ws.send(
-        JSON.stringify({
-          type: "answer",
-          to: senderId,
-          from: "receiver",
-          sdp: tweakSdp(answer.sdp ?? ""),
-        }),
-      );
+      // Every offer is a brand-new sender session (the sender always offers from a
+      // fresh PC), so the reducer unconditionally rebuilds — see receiverReduce.
+      dispatch({ t: "offer", id: msg.from, sdp: msg.sdp });
     }
 
     if (msg.type === "ice-candidate" && msg.candidate) {
-      const pc = pcs[msg.from];
-      if (pc) await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+      // Buffered until this slot's remote description is set, then flushed.
+      dispatch({ t: "ice", id: msg.from, candidate: msg.candidate });
     }
 
     if (msg.type === "peer-disconnected") {

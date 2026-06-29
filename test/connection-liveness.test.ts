@@ -1,9 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import {
-  trackConnectionLiveness,
-  isDeadConnectionState,
-  DISCONNECT_GRACE_MS,
-} from "../src/client/rtc-utils";
+import { trackConnectionLiveness, DISCONNECT_GRACE_MS } from "../src/client/rtc-utils";
 
 // trackConnectionLiveness separates a transient ICE flap (a `disconnected` that
 // self-heals) from a real loss (`failed`, or a `disconnected` held past the grace
@@ -71,22 +67,5 @@ describe("trackConnectionLiveness", () => {
     vi.advanceTimersByTime(1);
     expect(lost).toBe(1);
     w.stop();
-  });
-});
-
-// Guards which connection states force a fresh PC on an incoming (re)offer vs.
-// reuse the existing one. The whole RTCPeerConnectionState union is enumerated so
-// adding/removing a "dead" state is a deliberate, visible change here.
-describe("isDeadConnectionState", () => {
-  it("treats failed / closed / disconnected as dead (rebuild)", () => {
-    expect(isDeadConnectionState("failed")).toBe(true);
-    expect(isDeadConnectionState("closed")).toBe(true);
-    expect(isDeadConnectionState("disconnected")).toBe(true);
-  });
-
-  it("treats new / connecting / connected as reusable", () => {
-    expect(isDeadConnectionState("new")).toBe(false);
-    expect(isDeadConnectionState("connecting")).toBe(false);
-    expect(isDeadConnectionState("connected")).toBe(false);
   });
 });

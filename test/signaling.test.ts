@@ -1,5 +1,4 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { readFileSync } from "node:fs";
 import {
   signalingUrl,
   signalingHost,
@@ -9,7 +8,10 @@ import {
   generateRoomCode,
   ROOM_ALPHABET,
   SENDER_IDS,
+  HB_INTERVAL_MS,
+  HB_TIMEOUT_MS,
 } from "../src/client/rtc-utils";
+import * as core from "../src/core/room";
 
 describe("signalingUrl", () => {
   const ROOM = "ABC234";
@@ -130,17 +132,19 @@ describe("room codes", () => {
     }
   });
 
-  it("keeps the Worker's room-code regex in sync with the client (drift guard)", () => {
-    // The Worker hub holds its own copy of the room-code pattern. If the alphabet
-    // or length here ever changes, this trips so the two can't silently diverge.
-    const workerSrc = readFileSync("worker/src/signaling.ts", "utf8");
-    expect(workerSrc).toContain(`[${ROOM_ALPHABET}]{8}`);
-  });
-
-  it("keeps the Worker's sender ids in sync with the client (drift guard)", () => {
-    // The Worker duplicates SENDER_IDS inline; guard the two slot names so a
-    // rename here can't silently leave the Worker assigning stale ids.
-    const workerSrc = readFileSync("worker/src/signaling.ts", "utf8");
-    for (const id of SENDER_IDS) expect(workerSrc).toContain(`"${id}"`);
+  it("keeps the shared hub core's constants in sync with the client (drift guard)", () => {
+    // src/core/room.ts is the single source the two hub runtimes import. The client
+    // can't import it (its build is rooted at src/client), so it keeps a mirror —
+    // this guards the mirror against the core so room codes, slot ids, and the
+    // heartbeat windows can never disagree between the pages and the hub.
+    expect(core.ROOM_ALPHABET).toBe(ROOM_ALPHABET);
+    expect([...core.SENDER_IDS]).toEqual([...SENDER_IDS]);
+    expect(core.HB_INTERVAL_MS).toBe(HB_INTERVAL_MS);
+    expect(core.HB_TIMEOUT_MS).toBe(HB_TIMEOUT_MS);
+    // The core's regex must accept exactly what the client validator does.
+    const ok = generateRoomCode();
+    expect(core.ROOM_RE.test(ok)).toBe(isValidRoomCode(ok));
+    expect(core.ROOM_RE.test("short")).toBe(false);
+    expect(core.ROOM_RE.test("00000000")).toBe(false); // ambiguous chars excluded
   });
 });

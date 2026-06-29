@@ -5,7 +5,6 @@ import {
   clientToken,
   coerceRoomCode,
   persistRoomInUrl,
-  tweakSdp,
   PRESETS,
   HEIGHT_LADDER,
   isPreset,
@@ -19,6 +18,13 @@ import {
   type ResTarget,
   type SenderInMsg,
 } from "./rtc-utils.js";
+import {
+  senderReduce,
+  initialSenderState,
+  type SenderState,
+  type SenderEvent,
+  type SenderAction,
+} from "./sender-session.js";
 
 // The room code this sender pairs through. Set during room resolution at the
 // bottom of the module before startSender() runs.
@@ -346,51 +352,101 @@ function startSender(): void {
     }
   });
 
-  async function makeOffer(): Promise<void> {
-    if (!myId) return; // no slot yet — can't address an offer
-    pc?.close();
-    pc = new RTCPeerConnection(STUN);
-    resetAdaptBaseline();
+  // ── Negotiation: pure reducer + thin adapter ────────────────────────────
+  // All offer/answer/ICE decisions live in senderReduce (pure, unit-tested).
+  // This adapter performs the real RTCPeerConnection I/O and feeds results back
+  // as events. currentEpoch is the live PC generation: every async result and
+  // every PC handler is checked against it so a superseded negotiation (a newer
+  // offer-trigger fired first) can't drive status, retry, or apply to a dead PC.
+  let senderSession: SenderState = initialSenderState;
+  let currentEpoch = 0;
 
-    for (const track of stream!.getTracks()) pc.addTrack(track, stream!);
+  function dispatch(event: SenderEvent): void {
+    const { state, actions } = senderReduce(senderSession, event);
+    senderSession = state;
+    for (const action of actions) applySender(action);
+  }
 
-    pc.onicecandidate = ({ candidate }) => {
-      if (candidate)
-        ws?.send(JSON.stringify({ type: "ice-candidate", to: "receiver", from: myId, candidate }));
-    };
+  function applySender(action: SenderAction): void {
+    switch (action.t) {
+      case "create-pc": {
+        currentEpoch = action.epoch;
+        const epoch = action.epoch;
+        pc?.close();
+        pc = new RTCPeerConnection(STUN);
+        resetAdaptBaseline();
+        for (const track of stream!.getTracks()) pc.addTrack(track, stream!);
 
-    pc.onconnectionstatechange = async () => {
-      const state = pc?.connectionState;
-      if (state === "connected") {
-        if (retryTimer) {
-          clearTimeout(retryTimer);
-          retryTimer = null;
-        }
-        setStatus("Streaming to TV", "connected");
-        updateFavicon();
-        await applyTarget(currentTarget);
+        pc.onicecandidate = ({ candidate }) => {
+          if (candidate && myId)
+            ws?.send(
+              JSON.stringify({ type: "ice-candidate", to: "receiver", from: myId, candidate }),
+            );
+        };
+
+        pc.onconnectionstatechange = () => {
+          if (epoch !== currentEpoch) return; // a superseded PC — ignore it
+          const state = pc?.connectionState;
+          if (state === "connected") {
+            if (retryTimer) {
+              clearTimeout(retryTimer);
+              retryTimer = null;
+            }
+            setStatus("Streaming to TV", "connected");
+            updateFavicon();
+            void applyTarget(currentTarget);
+          }
+          if (state === "failed" && !retryTimer) {
+            setStatus("Connection failed — retrying…", "error");
+            updateFavicon();
+            retryTimer = setTimeout(() => {
+              retryTimer = null;
+              if (stream && receiverReady) dispatch({ t: "offer-trigger" });
+            }, 3000);
+          }
+        };
+        break;
       }
-      if (state === "failed" && !retryTimer) {
-        setStatus("Connection failed — retrying…", "error");
-        updateFavicon();
-        const thisPc = pc;
-        retryTimer = setTimeout(() => {
-          retryTimer = null;
-          if (stream && receiverReady && pc === thisPc) void makeOffer();
-        }, 3000);
+      case "create-offer": {
+        if (!pc) break;
+        const thePc = pc;
+        const epoch = action.epoch;
+        thePc
+          .createOffer()
+          .then(async (offer) => {
+            if (epoch !== currentEpoch || pc !== thePc) return; // superseded
+            await thePc.setLocalDescription(offer);
+            dispatch({ t: "offer-created", epoch, sdp: offer.sdp ?? "" });
+          })
+          .catch(() => dispatch({ t: "op-failed", epoch, op: "offer" }));
+        break;
       }
-    };
-
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    ws?.send(
-      JSON.stringify({
-        type: "offer",
-        to: "receiver",
-        from: myId,
-        sdp: tweakSdp(offer.sdp ?? "", true),
-      }),
-    );
+      case "send-offer": {
+        if (myId)
+          ws?.send(
+            JSON.stringify({ type: "offer", to: "receiver", from: myId, sdp: action.sdp }),
+          );
+        break;
+      }
+      case "set-remote": {
+        if (action.epoch !== currentEpoch || !pc) break;
+        pc.setRemoteDescription(new RTCSessionDescription({ type: "answer", sdp: action.sdp }))
+          .then(() => dispatch({ t: "remote-set", epoch: action.epoch }))
+          .catch(() => dispatch({ t: "op-failed", epoch: action.epoch, op: "remote" }));
+        break;
+      }
+      case "add-ice": {
+        if (action.epoch !== currentEpoch || !pc) break;
+        // A single rejected candidate must not tear the session down — swallow it.
+        pc.addIceCandidate(new RTCIceCandidate(action.candidate)).catch(() => {});
+        break;
+      }
+      case "close-pc": {
+        pc?.close();
+        pc = null;
+        break;
+      }
+    }
   }
 
   // Register as a sender; the hub assigns a slot and replies `assigned`. Prefer
@@ -429,7 +485,7 @@ function startSender(): void {
       updateFavicon();
     };
 
-    sock.onmessage = async (e: MessageEvent<string>) => {
+    sock.onmessage = (e: MessageEvent<string>) => {
       hb.alive();
       let msg: SenderInMsg;
       try {
@@ -470,26 +526,25 @@ function startSender(): void {
         receiverReady = true;
         setStatus("TV receiver connected", "connected");
         updateFavicon();
-        if (stream) await makeOffer();
+        if (stream) dispatch({ t: "offer-trigger" });
       }
       if (msg.type === "answer") {
-        await pc?.setRemoteDescription(new RTCSessionDescription({ type: "answer", sdp: msg.sdp }));
+        dispatch({ t: "answer", sdp: msg.sdp });
       }
       if (msg.type === "ice-candidate" && msg.candidate) {
-        await pc?.addIceCandidate(new RTCIceCandidate(msg.candidate));
+        dispatch({ t: "ice", candidate: msg.candidate });
       }
       if (msg.type === "peer-disconnected") {
         setStatus("TV disconnected — reconnecting when it returns…");
         receiverReady = false;
         updateFavicon();
-        pc?.close();
-        pc = null;
+        dispatch({ t: "peer-gone" });
       }
       if (msg.type === "request-reoffers" && stream) {
-        await makeOffer();
+        dispatch({ t: "offer-trigger" });
       }
       if (msg.type === "res-hint") {
-        await applyTarget(msg.target);
+        void applyTarget(msg.target);
       }
     };
 
@@ -513,7 +568,7 @@ function startSender(): void {
   shareBtn.addEventListener("click", () => {
     void (async () => {
       try {
-        stream = await navigator.mediaDevices.getDisplayMedia({
+        const next = await navigator.mediaDevices.getDisplayMedia({
           video: {
             // Capture at native (up to 4K) so a focused stream on a 4K panel
             // can be genuinely sharp. Capture resolution doesn't affect latency,
@@ -531,24 +586,69 @@ function startSender(): void {
             channelCount: 2,
           },
         });
-        stream.getVideoTracks().forEach((t) => {
-          t.contentHint = "detail";
-        });
-        preview.srcObject = stream;
+
+        const newVideo = next.getVideoTracks()[0]!;
+        const newAudio = next.getAudioTracks()[0] ?? null;
+        newVideo.contentHint = "detail";
+
+        // Decide how to bring the new capture online. If a peer connection is
+        // already live, hot-swap the outgoing tracks in place (replaceTrack)
+        // rather than renegotiating: the receiver keeps the *same* track and
+        // video element and just starts decoding new frames, so there's no PC
+        // teardown and no blank-gray flash on the TV. We only fall back to a
+        // fresh offer when there's nothing to swap on (first share, or the
+        // receiver isn't up yet), or when the audio track's presence changed
+        // (that needs a new m-line, i.e. a real renegotiation).
+        const videoSender = pc?.getSenders().find((s) => s.track?.kind === "video") ?? null;
+        const audioSender = pc?.getSenders().find((s) => s.track?.kind === "audio") ?? null;
+        const audioUnchanged = Boolean(audioSender) === Boolean(newAudio);
+        const hotSwap =
+          pc?.connectionState === "connected" && videoSender !== null && audioUnchanged;
+
+        // The capture we're replacing. Stopped at the end, once nothing points at
+        // its tracks, so the browser drops the old "sharing" indicator — the
+        // previously-un-closed old instance.
+        const previous = stream;
+
+        stream = next;
+        preview.srcObject = next;
         preview.classList.add("visible");
         shareBtn.textContent = "Re-share Screen";
 
-        stream.getVideoTracks()[0]!.onended = () => {
+        // Bound to this specific stream: a later re-share supersedes it, so a
+        // stale end (including the manual stop of `previous` below) can't tear
+        // down the live share — only the current stream ending does.
+        newVideo.onended = () => {
+          if (stream !== next) return;
           setStatus("Screen share stopped");
           stream = null;
           preview.classList.remove("visible");
-          pc?.close();
-          pc = null;
+          dispatch({ t: "peer-gone" });
           updateFavicon();
         };
 
-        if (receiverReady) await makeOffer();
-        else setStatus("Waiting for TV receiver…");
+        if (hotSwap) {
+          // Swap the live senders before stopping the old tracks, so the outbound
+          // stream never goes dark in the gap.
+          await videoSender!.replaceTrack(newVideo);
+          if (audioSender && newAudio) await audioSender.replaceTrack(newAudio);
+          void applyTarget(currentTarget);
+          setStatus("Streaming to TV", "connected");
+        } else if (receiverReady) {
+          dispatch({ t: "offer-trigger" });
+        } else {
+          setStatus("Waiting for TV receiver…");
+        }
+
+        // Now that the new capture is wired in (swapped onto the live senders, or
+        // about to be added to a fresh PC by offer-trigger), stop the old one.
+        // Clear its onended first so the stop doesn't dispatch a teardown.
+        if (previous) {
+          for (const t of previous.getTracks()) {
+            t.onended = null;
+            t.stop();
+          }
+        }
         updateFavicon();
       } catch (err) {
         setStatus(`Error: ${(err as Error).message}`, "error");

@@ -183,16 +183,6 @@ export function trackConnectionLiveness(opts: { graceMs?: number; onLost: () => 
   };
 }
 
-// Is a peer connection beyond saving, so an incoming (re)offer must build a fresh
-// one rather than reuse it? `failed`/`closed` are terminal; `disconnected` counts
-// here because by the time a recovery re-offer arrives we've already escalated
-// past the self-heal window (see trackConnectionLiveness) — reusing it would
-// answer on a dead transport and leave ontrack silent (blank video). A `new`,
-// `connecting`, or `connected` PC is reused for an ordinary renegotiation.
-export function isDeadConnectionState(state: RTCPeerConnectionState): boolean {
-  return state === "failed" || state === "closed" || state === "disconnected";
-}
-
 // ── Room codes ─────────────────────────────────────────────────────────────
 // A public hub is multi-tenant: one signaling room per code keeps each
 // household's signaling isolated, so the code is also the only access gate —
