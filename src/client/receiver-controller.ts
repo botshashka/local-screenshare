@@ -155,8 +155,8 @@ export function receiverControllerReduce(
 
     case "reveal-fallback-fired": {
       const slot = slotOf(state, event.id);
-      // Mirror the adapter's old guard: only reveal if still the current PC and
-      // actually connected, and not already revealed.
+      // Only reveal if this is still the current PC, it's actually connected, and
+      // it isn't already revealed.
       if (!isLiveGen(slot, event.gen) || slot.revealed || slot.conn !== "connected") {
         return { state, actions: [] };
       }

@@ -488,6 +488,10 @@ setTimeout(() => {
 // re-bases the slot's generation.
 function createPC(senderId: string, gen: number): RTCPeerConnection {
   pcs[senderId]?.close();
+  // Stop the prior slot's liveness watcher before it's overwritten below — its
+  // identity-guarded onLost would no-op on the superseded PC, but leaving the
+  // grace timer running orphans it for the rest of the grace window.
+  livenessWatchers[senderId]?.stop();
   dispatchRx({ t: "offer-arrived", id: senderId, gen });
 
   const pc = new RTCPeerConnection(STUN);

@@ -23,7 +23,9 @@ class Room {
 
   connect(now = 0): ConnKey {
     const key: ConnKey = {};
-    this.conns.set(key, { id: null, seen: now, token: "" });
+    // Frozen so any attempt by the core to mutate an attachment in-place (it must
+    // treat the snapshot as immutable) throws instead of passing silently.
+    this.conns.set(key, Object.freeze({ id: null, seen: now, token: "" }));
     return key;
   }
 
@@ -34,7 +36,7 @@ class Room {
   private apply(ops: Op[]): Op[] {
     for (const op of ops) {
       if (op.op === "send") this.sends.push({ to: op.to, msg: op.msg as SignalMsg });
-      else if (op.op === "attach") this.conns.set(op.key, op.attach);
+      else if (op.op === "attach") this.conns.set(op.key, Object.freeze(op.attach));
       else if (op.op === "close") {
         this.closes.push({ key: op.key, kind: op.kind });
         this.conns.delete(op.key); // transport gone
@@ -316,5 +318,122 @@ describe("op ordering (hibernation-safe)", () => {
     const close = ops.findIndex((o) => o.op === "close" && o.key === ghost);
     expect(attachNull).toBeGreaterThanOrEqual(0);
     expect(close).toBeGreaterThan(attachNull);
+  });
+});
+
+// ── Exhaustive property / fuzz coverage ─────────────────────────────────────
+// The core is the SINGLE source of truth both runtimes share, so its invariants
+// are the ones a drift would break. Random sequences of connect / register / relay
+// / ping / close / sweep across multiple sockets must always preserve: at most one
+// live holder per id, only valid ids ever assigned, an "assigned" reply matching
+// the slot the socket ends up holding, and the hibernation-safe op ordering
+// (attach-null strictly before the matching close). Attachments are frozen
+// (see the Room helper) so any in-place mutation of the snapshot throws — that is
+// the purity guarantee encoded as a runtime check.
+describe("core invariants under random sequences", () => {
+  function lcg(seed: number): () => number {
+    let s = seed >>> 0;
+    return () => {
+      s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+      return s / 0xffffffff;
+    };
+  }
+
+  const VALID_IDS = new Set(["device-a", "device-b", "receiver"]);
+  const TIMEOUT = 30_000;
+
+  // Every close (reap or replace) must be preceded in the SAME op list by an
+  // attach nulling that key — else a closing socket's own handler still sees it
+  // registered and double-announces.
+  function checkOpOrdering(ops: Op[]): void {
+    ops.forEach((op, i) => {
+      if (op.op !== "close") return;
+      const nulledBefore = ops
+        .slice(0, i)
+        .some((o) => o.op === "attach" && o.key === op.key && o.attach.id === null);
+      expect(nulledBefore, "close must be preceded by attach(null) for the same key").toBe(true);
+    });
+  }
+
+  function checkRoom(room: Room): void {
+    const ids = [...room.conns.values()].map((a) => a.id).filter((id): id is string => id !== null);
+    for (const id of ids) expect(VALID_IDS.has(id)).toBe(true);
+    // At most one live holder per id (so ≤2 senders + 1 receiver, never a duplicate).
+    expect(new Set(ids).size).toBe(ids.length);
+  }
+
+  it("holds across 8 seeds × 400 random steps", () => {
+    for (let seed = 1; seed <= 8; seed++) {
+      const rng = lcg(seed * 2654435761);
+      const pick = <T,>(xs: T[]): T => xs[Math.floor(rng() * xs.length)]!;
+      const room = new Room();
+      const keys: ConnKey[] = [];
+      const tokens = ["t0", "t1", "t2", ""];
+      const targets = ["device-a", "device-b", "receiver", "nobody"];
+      let now = 0;
+
+      for (let i = 0; i < 400; i++) {
+        now += Math.floor(rng() * 12_000); // sometimes past the 30s timeout → reaps
+        const action = pick([
+          "connect",
+          "register-sender",
+          "register-receiver",
+          "relay",
+          "ping",
+          "close",
+          "sweep",
+        ] as const);
+
+        if (action === "connect") {
+          if (keys.length < 5) keys.push(room.connect(now));
+          continue;
+        }
+        if (action === "sweep") {
+          checkOpOrdering(room.sweep(now, TIMEOUT));
+          checkRoom(room);
+          continue;
+        }
+        if (!keys.length) continue;
+        const k = pick(keys);
+
+        switch (action) {
+          case "register-sender": {
+            const prefer = pick([undefined, "device-a", "device-b"]);
+            const ops = room.msg(
+              k,
+              { type: "register", role: "sender", token: pick(tokens), ...(prefer ? { prefer } : {}) },
+              now,
+              TIMEOUT,
+            );
+            checkOpOrdering(ops);
+            const assigned = ops.find((o) => o.op === "send" && (o.msg as SignalMsg).type === "assigned");
+            // A slot assignment is honored: the socket ends up holding exactly it.
+            if (assigned && assigned.op === "send") {
+              expect(room.idOf(k)).toBe((assigned.msg as SignalMsg).id);
+            }
+            break;
+          }
+          case "register-receiver": {
+            const ops = room.msg(k, { type: "register", id: "receiver" }, now, TIMEOUT);
+            checkOpOrdering(ops);
+            // The receiver is "newest wins" — registering a live socket always claims it.
+            if (room.conns.has(k)) expect(room.idOf(k)).toBe("receiver");
+            break;
+          }
+          case "relay":
+            checkOpOrdering(
+              room.msg(k, { type: "offer", to: pick(targets), sdp: "SDP" }, now, TIMEOUT),
+            );
+            break;
+          case "ping":
+            checkOpOrdering(room.msg(k, { type: "ping" }, now, TIMEOUT));
+            break;
+          case "close":
+            checkOpOrdering(room.close(k));
+            break;
+        }
+        checkRoom(room);
+      }
+    }
   });
 });

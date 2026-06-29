@@ -7,10 +7,10 @@
 // senderReduce events (`offer-trigger` / `peer-gone`).
 //
 // Every getDisplayMedia capture is tagged with a monotonic generation (`gen`).
-// The gen is the airtight replacement for the old `if (stream !== next) return`
-// onended closure guard: a superseded acquisition, or a stale capture's `ended`
-// event, is dropped by gen rather than by object identity threaded through a
-// closure. This is the same idea as the negotiation Epoch, applied to the source.
+// A superseded acquisition, or a stale capture's `ended` event, is dropped by
+// comparing its gen against the live one rather than by threading object identity
+// through a closure. This is the same idea as the negotiation Epoch, applied to
+// the source.
 //
 // Why the non-obvious rules exist (each prevents a real regression):
 //   • `socket-down` (signaling WS closed) is NOT `receiver-gone`. A signaling blip
@@ -155,6 +155,19 @@ export function senderControllerReduce(
             { t: "swap-tracks", gen: capture.gen, retireGen: old.gen },
           ],
         };
+      }
+
+      // Can't hot-swap (audio layout changed) but a live or in-flight PC is still
+      // carrying the old capture's tracks over P2P, and we can't renegotiate
+      // without a receiver. During a signaling outage (`receiverReady` cleared, but
+      // the PC kept by `socket-down`) a fresh offer can't be delivered — so retiring
+      // the old tracks here would blank the TV with nothing to replace them. Keep
+      // the live share untouched and drop the just-acquired capture; the user can
+      // re-share once signaling reconnects (the status shows "Server disconnected").
+      // (`conn === "idle"` means no live PC, so the old held capture is safe to
+      // replace below; `receiverReady` means we can renegotiate.)
+      if (state.conn !== "idle" && !state.receiverReady) {
+        return { state: { ...state, pendingGen: null }, actions: [{ t: "stop-capture", gen: event.gen }] };
       }
 
       // Otherwise bring it online by (re)negotiating a fresh PC — but only if a

@@ -4,18 +4,15 @@ import {
   initialReceiverState,
   type ReceiverState,
   type ReceiverEvent,
-  type ReceiverAction,
 } from "../src/client/receiver-session";
+import { harness } from "./reducer-harness";
 
 // The receiver negotiation reducer is pure: feed it events, assert on the returned
 // actions + state. No real WebRTC, no timers. These lock in the two bugs the
 // imperative onmessage handler shipped: reusing a live PC on a new offer (blank
 // video on Re-share), and dropping ICE that arrives before the remote description.
 
-// Drive a sequence of events, returning the final state.
-function drive(state: ReceiverState, ...events: ReceiverEvent[]): ReceiverState {
-  return events.reduce((s, e) => receiverReduce(s, e).state, state);
-}
+const { drive, actionsFor } = harness(receiverReduce);
 
 // The epoch the reducer assigned to a slot (for feeding adapter-result events).
 function epochOf(state: ReceiverState, id: string): number {
@@ -24,11 +21,7 @@ function epochOf(state: ReceiverState, id: string): number {
   return peer.epoch;
 }
 
-function actionsFor(state: ReceiverState, event: ReceiverEvent): ReceiverAction[] {
-  return receiverReduce(state, event).actions;
-}
-
-describe("receiverReduce — offer handling (bug #1)", () => {
+describe("receiverReduce — offer handling", () => {
   it("builds a fresh PC on the first offer and sets the remote description", () => {
     const { state, actions } = receiverReduce(initialReceiverState, {
       t: "offer",
@@ -68,7 +61,7 @@ describe("receiverReduce — offer handling (bug #1)", () => {
   });
 });
 
-describe("receiverReduce — ICE buffering (bug #4)", () => {
+describe("receiverReduce — ICE buffering", () => {
   it("buffers a candidate that arrives before remote-set, then flushes it", () => {
     let state = drive(initialReceiverState, { t: "offer", id: "device-a", sdp: "OFFER" });
     const epoch = epochOf(state, "device-a");
@@ -107,7 +100,7 @@ describe("receiverReduce — ICE buffering (bug #4)", () => {
   });
 });
 
-describe("receiverReduce — stale epoch guard (bug #2/#3)", () => {
+describe("receiverReduce — stale epoch guard", () => {
   it("ignores adapter results tagged with a superseded epoch", () => {
     let state = drive(initialReceiverState, { t: "offer", id: "device-a", sdp: "OFFER1" });
     const stale = epochOf(state, "device-a");
@@ -150,5 +143,82 @@ describe("receiverReduce — stale epoch guard (bug #2/#3)", () => {
     // A fresh offer still works (new epoch, clean rebuild).
     const { actions } = receiverReduce(state, { t: "offer", id: "device-a", sdp: "OFFER2" });
     expect(actions.some((a) => a.t === "create-pc")).toBe(true);
+  });
+});
+
+// ── Exhaustive property / fuzz coverage ─────────────────────────────────────
+// The receiver multiplexes a negotiation per sender slot. Random interleavings
+// across both slots must preserve: monotonic global epochs, every action carries
+// its slot's CURRENT epoch (no result drives a superseded PC), an offer always
+// rebuilds with a fresh epoch, and a stale/peerless event for a slot does nothing.
+describe("receiverReduce — invariants under random sequences", () => {
+  function lcg(seed: number): () => number {
+    let s = seed >>> 0;
+    return () => {
+      s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+      return s / 0xffffffff;
+    };
+  }
+
+  const IDS = ["device-a", "device-b"];
+
+  function randomEvent(rng: () => number, s: ReceiverState, id: string): ReceiverEvent {
+    const pick = <T,>(xs: T[]): T => xs[Math.floor(rng() * xs.length)]!;
+    const epoch = pick([s.peers[id]?.epoch ?? 0, s.nextEpoch, s.nextEpoch - 1, 1, 99]);
+    const kind = pick(["offer", "ice", "remote-set", "answer-created", "op-failed"] as const);
+    switch (kind) {
+      case "offer":
+        return { t: "offer", id, sdp: "v=0\r\n" };
+      case "ice":
+        return { t: "ice", id, candidate: { candidate: "candidate:1" } as RTCIceCandidateInit };
+      case "remote-set":
+        return { t: "remote-set", id, epoch };
+      case "answer-created":
+        return { t: "answer-created", id, epoch, sdp: "v=0\r\n" };
+      default:
+        return { t: "op-failed", id, epoch, op: pick(["remote", "answer", "ice"] as const) };
+    }
+  }
+
+  it("holds across 4000 random steps over 8 seeds", () => {
+    for (let seed = 1; seed <= 8; seed++) {
+      const rng = lcg(seed * 2654435761);
+      let state = initialReceiverState;
+      for (let i = 0; i < 500; i++) {
+        const id = IDS[Math.floor(rng() * IDS.length)]!;
+        const event = randomEvent(rng, state, id);
+        const before = structuredClone(state);
+        const { state: next, actions } = receiverReduce(state, event);
+
+        // Purity: the reducer never mutates the state it was handed.
+        expect(state).toEqual(before);
+
+        // Epochs are monotonic; an offer always rebuilds with a fresh, higher epoch.
+        expect(next.nextEpoch).toBeGreaterThanOrEqual(state.nextEpoch);
+        if (event.t === "offer") {
+          expect(next.nextEpoch).toBe(state.nextEpoch + 1);
+          expect(next.peers[id]?.epoch).toBe(state.nextEpoch);
+        }
+
+        // Every live (non-placeholder) peer epoch is one already issued.
+        for (const peer of Object.values(next.peers)) {
+          expect(peer.epoch).toBeLessThan(next.nextEpoch);
+        }
+
+        // Every action targets its slot's CURRENT epoch — no result drives a
+        // superseded PC for that slot.
+        for (const a of actions) {
+          expect(a.epoch).toBe(next.peers[a.id]?.epoch);
+        }
+
+        // A stale or peerless event for a slot (anything but a fresh offer, or a
+        // first ICE that opens a buffering placeholder) emits nothing.
+        if (event.t !== "offer" && event.t !== "ice" && !state.peers[id]) {
+          expect(actions).toEqual([]);
+        }
+
+        state = next;
+      }
+    }
   });
 });

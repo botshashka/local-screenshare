@@ -4,16 +4,16 @@
 // in sender.ts performs the real RTCPeerConnection I/O, feeding results back as
 // events.
 //
-// Bugs this fixes:
-//   #2 — every async PC result is tagged with the epoch it was issued under and
-//        dropped if stale, so an out-of-order answer / candidate can't throw an
-//        unhandled rejection or be applied to the wrong PC.
-//   #3 — the reducer is the single owner of the peer session. Overlapping offer
-//        triggers (receiver-ready + request-reoffers + Share + retry all call into
-//        the same path) bump one epoch and supersede deterministically, instead of
-//        two `makeOffer`s racing over a shared `pc` variable.
-//   #4 — incoming ICE that arrives before the answer is applied is buffered and
-//        flushed on remote-set (the sender hits the same pre-remote race).
+// The invariants it enforces:
+//   • Every async PC result is tagged with the epoch it was issued under and
+//     dropped if stale, so an out-of-order answer / candidate can't throw an
+//     unhandled rejection or be applied to the wrong PC.
+//   • The reducer is the single owner of the peer session. Overlapping offer
+//     triggers (receiver-ready + request-reoffers + Share + retry all call into
+//     the same path) bump one epoch and supersede deterministically, instead of
+//     two `makeOffer`s racing over a shared `pc` variable.
+//   • Incoming ICE that arrives before the answer is applied is buffered and
+//     flushed on remote-set (the sender hits the same pre-remote race).
 
 import { tweakSdp } from "./rtc-utils.js";
 import {
@@ -124,8 +124,11 @@ export function senderReduce(state: SenderState, event: SenderEvent): Result {
 
     case "op-failed": {
       if (!isCurrentEpoch(state.peer ?? undefined, event.epoch)) return { state, actions: [] };
-      // Drop the dead session; the adapter's failed-state retry re-triggers an offer.
-      return { state: { ...state, peer: null }, actions: [] };
+      // Drop the dead session AND close its PC. Closing here (rather than leaving it
+      // for the next create-pc) keeps teardown airtight: if `peer-gone` arrives
+      // first — a capture-ended landing before the failed-state retry — it
+      // early-returns on the already-null peer, so without this the PC would leak.
+      return { state: { ...state, peer: null }, actions: [{ t: "close-pc" }] };
     }
 
     case "peer-gone": {

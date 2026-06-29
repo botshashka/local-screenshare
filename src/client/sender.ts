@@ -589,11 +589,16 @@ function startSender(): void {
     if (!pc || !captured) return;
     const newVideo = captured.getVideoTracks()[0] ?? null;
     const newAudio = captured.getAudioTracks()[0] ?? null;
+    const swaps: Promise<void>[] = [];
     for (const sender of pc.getSenders()) {
       const kind = sender.track?.kind;
-      if (kind === "video" && newVideo) await sender.replaceTrack(newVideo);
-      else if (kind === "audio" && newAudio) await sender.replaceTrack(newAudio);
+      if (kind === "video" && newVideo) swaps.push(sender.replaceTrack(newVideo));
+      else if (kind === "audio" && newAudio) swaps.push(sender.replaceTrack(newAudio));
     }
+    // The video/audio swaps are independent — run them concurrently. replaceTrack
+    // can reject if a teardown/renegotiation closes the PC mid-swap; swallow it
+    // rather than surfacing an unhandled rejection from this `void`-ed call.
+    await Promise.all(swaps).catch(() => {});
     void applyTarget(currentTarget);
     // Retire the old capture only after the swap, so the outbound stream never
     // goes dark in the gap.

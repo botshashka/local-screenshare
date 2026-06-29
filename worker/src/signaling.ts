@@ -18,6 +18,7 @@ import {
   onMessage,
   onClose,
   ROOM_RE,
+  WS_OPEN,
   type Attach,
   type Op,
   type SignalMsg,
@@ -30,8 +31,6 @@ export interface Env {
 
 // Signaling frames are always JSON text; one decoder covers the rare binary case.
 const DECODER = new TextDecoder();
-
-const OPEN = 1; // WebSocket.OPEN
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -92,7 +91,7 @@ export class SignalingRoom {
     for (const op of ops) {
       if (op.op === "send") {
         try {
-          if (op.to.readyState === OPEN) op.to.send(JSON.stringify(op.msg));
+          if (op.to.readyState === WS_OPEN) op.to.send(JSON.stringify(op.msg));
         } catch {
           // A socket racing into close can throw; its close handler cleans up.
         }

@@ -4,15 +4,13 @@
 // receiver.ts performs the real RTCPeerConnection I/O and feeds results back as
 // events.
 //
-// Phase 1 scope: offer / ICE / answer negotiation only. Slot reveal, liveness,
-// peer-disconnected, and the room panel stay in the imperative adapter for now
-// (folded in later). The two bugs this fixes:
-//   #1 — an incoming offer ALWAYS rebuilds the PC (new epoch). The sender only
-//        ever offers from a brand-new PC, so an offer is always a new DTLS/ICE
-//        session; reusing a still-`connected` PC (the old code's behavior) left
-//        ontrack silent → blank video on Re-share / reconnect.
-//   #4 — ICE that arrives before setRemoteDescription resolves is buffered and
-//        flushed on remote-set, instead of being dropped or throwing.
+// The invariants it enforces:
+//   • An incoming offer ALWAYS rebuilds the PC (new epoch). The sender only ever
+//     offers from a brand-new PC, so an offer is always a fresh DTLS/ICE session;
+//     reusing a still-`connected` PC leaves ontrack silent → blank video on
+//     Re-share / reconnect.
+//   • ICE that arrives before setRemoteDescription resolves is buffered and
+//     flushed on remote-set, instead of being dropped or throwing.
 
 import { tweakSdp } from "./rtc-utils.js";
 import {

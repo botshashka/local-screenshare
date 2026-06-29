@@ -7,8 +7,8 @@ import {
   initialReceiverControllerState,
   type ReceiverControllerState,
   type ReceiverControllerEvent,
-  type ReceiverControllerAction,
 } from "../src/client/receiver-controller";
+import { harness } from "./reducer-harness";
 
 // The receiver per-slot media controller is pure. The headline property — the
 // srcObject invariant ("nulled only on peer-disconnected, reset only on
@@ -18,19 +18,7 @@ import {
 
 const A = "device-a";
 
-function drive(
-  state: ReceiverControllerState,
-  ...events: ReceiverControllerEvent[]
-): ReceiverControllerState {
-  return events.reduce((s, e) => receiverControllerReduce(s, e).state, state);
-}
-
-function actionsFor(
-  state: ReceiverControllerState,
-  event: ReceiverControllerEvent,
-): ReceiverControllerAction[] {
-  return receiverControllerReduce(state, event).actions;
-}
+const { drive, actionsFor } = harness(receiverControllerReduce);
 
 // Drive a slot to revealed-and-connected at generation `gen`.
 function live(id = A, gen = 1): ReceiverControllerState {

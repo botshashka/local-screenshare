@@ -6,6 +6,7 @@ import {
   HB_INTERVAL_MS,
   HB_TIMEOUT_MS,
   SENDER_IDS,
+  WS_OPEN,
   type Attach,
   type Op,
   type SignalMsg,
@@ -20,8 +21,6 @@ import {
 // two can no longer drift.
 
 export { HB_INTERVAL_MS, HB_TIMEOUT_MS, SENDER_IDS };
-
-const OPEN = 1; // WebSocket.OPEN — avoid importing the runtime enum into tests.
 
 export interface Hub {
   // The single live socket per registered id, derived on access. For tests.
@@ -50,7 +49,7 @@ export function createHub(opts: { log?: (msg: string) => void; timeoutMs?: numbe
   function applyOps(ops: Op<WebSocket>[]): void {
     for (const op of ops) {
       if (op.op === "send") {
-        if (op.to.readyState === OPEN) op.to.send(JSON.stringify(op.msg));
+        if (op.to.readyState === WS_OPEN) op.to.send(JSON.stringify(op.msg));
       } else if (op.op === "attach") {
         const prev = conns.get(op.key)?.id ?? null;
         conns.set(op.key, op.attach);

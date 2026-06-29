@@ -7,25 +7,14 @@ import {
   type SenderControllerEvent,
   type SenderControllerAction,
 } from "../src/client/sender-controller";
+import { harness } from "./reducer-harness";
 
 // The sender media-lifecycle controller is pure. These lock in the capture
 // generation guards (stale onended / superseded acquisition), the hot-swap vs
 // renegotiate decision, and the signaling-blip / retry behavior that the old
 // imperative shareBtn handler could not enforce.
 
-function drive(
-  state: SenderControllerState,
-  ...events: SenderControllerEvent[]
-): SenderControllerState {
-  return events.reduce((s, e) => senderControllerReduce(s, e).state, state);
-}
-
-function actionsFor(
-  state: SenderControllerState,
-  event: SenderControllerEvent,
-): SenderControllerAction[] {
-  return senderControllerReduce(state, event).actions;
-}
+const { drive, actionsFor } = harness(senderControllerReduce);
 
 // Drive to a live, connected single capture {gen:1, hasAudio} with a receiver up.
 function connected(hasAudio = true): SenderControllerState {
@@ -210,6 +199,26 @@ describe("senderControllerReduce — signaling lifecycle", () => {
     const s = drive(connected(true), { t: "socket-down" }, { t: "share-requested" });
     const actions = actionsFor(s, { t: "capture-acquired", gen: 2, hasAudio: true });
     expect(actions).toContainEqual({ t: "swap-tracks", gen: 2, retireGen: 1 });
+  });
+
+  it("re-share with an audio change during an outage drops the new capture, never the live one", () => {
+    // Outage (conn stays "connected", receiverReady cleared), then a re-share whose
+    // audio presence differs: it can't hot-swap and can't renegotiate without
+    // signaling. The live gen-1 tracks must NOT be stopped — only the just-acquired
+    // gen-2 capture is dropped, leaving the P2P stream flowing to the TV.
+    const s = drive(connected(true), { t: "socket-down" }, { t: "share-requested" });
+    const { state, actions } = senderControllerReduce(s, {
+      t: "capture-acquired",
+      gen: 2,
+      hasAudio: false,
+    });
+    expect(actions).toEqual([{ t: "stop-capture", gen: 2 }]); // the NEW capture, not gen 1
+    expect(state.capture).toEqual({ gen: 1, hasAudio: true }); // live capture untouched
+    expect(state.conn).toBe("connected");
+    expect(state.pendingGen).toBeNull();
+    // When signaling reconnects, the still-live gen-1 capture renegotiates cleanly.
+    const reconnected = senderControllerReduce(state, { t: "receiver-ready" });
+    expect(reconnected.actions).toEqual([{ t: "use-capture", gen: 1 }, { t: "renegotiate" }]);
   });
 
   it("receiver-ready after reconnect renegotiates the live capture", () => {
@@ -418,6 +427,7 @@ describe("senderControllerReduce — invariants under random sequences", () => {
 
   function checkStep(
     before: SenderControllerState,
+    event: SenderControllerEvent,
     actions: SenderControllerAction[],
     after: SenderControllerState,
   ): void {
@@ -428,6 +438,25 @@ describe("senderControllerReduce — invariants under random sequences", () => {
       expect(after.pendingGen).toBeLessThan(after.nextGen);
     }
     expect(["idle", "connecting", "connected"]).toContain(after.conn);
+
+    // Safety the socket-down re-share fix restores: when a genuine re-share is
+    // accepted (a capture-acquired for the pending gen) over a live or connecting
+    // PC, the previous capture's tracks may be stopped ONLY if the same batch
+    // renegotiates a fresh PC to replace them. Stopping them with no renegotiation
+    // would blank the TV mid-stream — the exact regression this guards. (The
+    // superseded-acquisition branch is excluded: its gens are unique by
+    // construction, so its stop-capture never targets the live capture.)
+    if (event.t === "capture-acquired" && event.gen === before.pendingGen && before.conn !== "idle") {
+      const liveGen = before.capture?.gen;
+      const stopsLive =
+        liveGen !== undefined && actions.some((a) => a.t === "stop-capture" && a.gen === liveGen);
+      if (stopsLive) {
+        expect(
+          actions.some((a) => a.t === "renegotiate"),
+          "stopping the live capture on an accepted re-share requires a renegotiate",
+        ).toBe(true);
+      }
+    }
 
     const reneg = actions.findIndex((a) => a.t === "renegotiate");
     const swap = actions.findIndex((a) => a.t === "swap-tracks");
@@ -466,7 +495,7 @@ describe("senderControllerReduce — invariants under random sequences", () => {
       for (let i = 0; i < 500; i++) {
         const event = randomEvent(rng, state);
         const { state: next, actions } = senderControllerReduce(state, event);
-        checkStep(state, actions, next);
+        checkStep(state, event, actions, next);
         state = next;
       }
     }

@@ -32,6 +32,11 @@ export const ROOM_RE = new RegExp(`^[${ROOM_ALPHABET}]{${ROOM_LEN}}$`);
 export const HB_INTERVAL_MS = 10_000;
 export const HB_TIMEOUT_MS = 30_000;
 
+// A WebSocket in the OPEN ready state (the WHATWG `readyState` value). Defined
+// here so both adapters gate sends on it without importing a runtime WebSocket
+// enum, which would pull a runtime dependency into this deliberately import-free core.
+export const WS_OPEN = 1;
+
 // ── Types ───────────────────────────────────────────────────────────────────
 
 // An opaque per-connection handle. The core only ever compares these by === — it
