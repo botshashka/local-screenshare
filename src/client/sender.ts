@@ -499,6 +499,11 @@ function startSender(): void {
       case "attach-preview":
         attachPreview(action.gen);
         break;
+      case "detach-preview":
+        preview.classList.remove("visible");
+        preview.srcObject = null;
+        shareBtn.textContent = "Share Screen";
+        break;
       case "swap-tracks":
         void swapTracks(action.gen, action.retireGen);
         break;

@@ -91,6 +91,9 @@ export type SenderControllerAction =
   | { t: "use-capture"; gen: Gen }
   // Adapter: preview.srcObject = captures[gen] + bind a gen-tagged onended.
   | { t: "attach-preview"; gen: Gen }
+  // Adapter: hide the preview and reset the Share button to its idle label — the
+  // last capture is gone, so the sender returns to its "nothing shared" state.
+  | { t: "detach-preview" }
   // Adapter: replaceTrack the live senders from captures[gen], THEN stop+drop
   // captures[retireGen] (in that order, so the stream never goes dark).
   | { t: "swap-tracks"; gen: Gen; retireGen: Gen }
@@ -184,9 +187,10 @@ export function senderControllerReduce(
       // re-share) is ignored; only the live capture ending tears down.
       if (!state.capture || event.gen !== state.capture.gen) return { state, actions: [] };
       // Retire the ended capture (drop it from the adapter's map + stop any
-      // sibling tracks) and tear the peer down.
+      // sibling tracks), return the preview/button to idle, and tear the peer down.
       const actions: SenderControllerAction[] = [
         { t: "stop-capture", gen: event.gen },
+        { t: "detach-preview" },
         { t: "teardown-peer" },
       ];
       if (state.retryPending) actions.push({ t: "cancel-retry" });

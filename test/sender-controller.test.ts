@@ -172,7 +172,11 @@ describe("senderControllerReduce — capture ended", () => {
   it("tears down when the live capture ends", () => {
     const s = connected();
     const { state, actions } = senderControllerReduce(s, { t: "capture-ended", gen: 1 });
-    expect(actions).toEqual([{ t: "stop-capture", gen: 1 }, { t: "teardown-peer" }]);
+    expect(actions).toEqual([
+      { t: "stop-capture", gen: 1 },
+      { t: "detach-preview" },
+      { t: "teardown-peer" },
+    ]);
     expect(state.capture).toBeNull();
     expect(state.conn).toBe("idle");
   });
