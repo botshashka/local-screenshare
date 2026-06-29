@@ -25,6 +25,14 @@ import {
   type SenderEvent,
   type SenderAction,
 } from "./sender-session.js";
+import {
+  senderControllerReduce,
+  senderView,
+  initialControllerState,
+  type SenderControllerState,
+  type SenderControllerEvent,
+  type SenderControllerAction,
+} from "./sender-controller.js";
 
 // The room code this sender pairs through. Set during room resolution at the
 // bottom of the module before startSender() runs.
@@ -124,8 +132,12 @@ function startSender(): void {
   let myId: DeviceId | "" = "";
   let pc: RTCPeerConnection | null = null;
   let ws: WebSocket | null = null;
+  // The capture the next/current PC is built from — written ONLY by the
+  // controller's `use-capture` action (so every PC is provably built from the
+  // current capture). `captures` holds every acquired stream by generation; the
+  // controller references them by gen and the adapter does the real stop/swap.
   let stream: MediaStream | null = null;
-  let receiverReady = false;
+  const captures = new Map<number, MediaStream>();
   // Default to a full-panel target until the receiver's first measured hint
   // arrives; the cap below keeps this from over-encoding on connect.
   let currentTarget: ResTarget = { w: 3840, h: 2160 };
@@ -176,14 +188,33 @@ function startSender(): void {
     statusEl.className = "status " + cls;
   }
 
-  function updateFavicon(): void {
-    if (pc?.connectionState === "connected" && stream) {
-      setFavicon(FAVICON.green);
-    } else if (receiverReady) {
-      setFavicon(FAVICON.amber);
+  // Signaling/registration phase, shown with precedence over the media view
+  // below; null once assigned, when the controller's derived view takes over.
+  type SignalingPhase = "joining" | "room-full" | "server-down" | null;
+  let signalingPhase: SignalingPhase = "joining";
+
+  // The pure media-lifecycle controller (capture acquire / hot-swap / renegotiate
+  // / teardown). The adapter feeds it events and applies its actions; senderView
+  // derives status + favicon from its state.
+  let ctl: SenderControllerState = initialControllerState;
+
+  // Single render path. Signaling phases (joining / room-full / server-down) win;
+  // otherwise the controller's derived view drives status, with the assigned-idle
+  // hint as the one adapter-owned fallback. Favicon always follows the view.
+  function render(): void {
+    const view = senderView(ctl);
+    if (signalingPhase === "server-down") {
+      setStatus("Server disconnected — retrying in 3s…", "error");
+    } else if (signalingPhase === "room-full") {
+      setStatus("Two devices are already sharing to this screen — waiting for a free slot…");
+    } else if (signalingPhase === "joining") {
+      setStatus("Joining…");
+    } else if (view.status) {
+      setStatus(view.status, view.cls);
     } else {
-      setFavicon(FAVICON.grey);
+      setStatus("Connected to server — waiting for TV receiver…");
     }
+    setFavicon(FAVICON[view.favicon]);
   }
 
   async function applyTarget(target: ResTarget): Promise<void> {
@@ -387,22 +418,17 @@ function startSender(): void {
         pc.onconnectionstatechange = () => {
           if (epoch !== currentEpoch) return; // a superseded PC — ignore it
           const state = pc?.connectionState;
+          // Feed the controller; it owns retry/status. Only connecting/connected/
+          // failed are meaningful — `disconnected` is a transient ICE blip that
+          // self-heals (forwarding it as failed re-creates the gray-screen retry),
+          // and `closed` is our own teardown.
           if (state === "connected") {
-            if (retryTimer) {
-              clearTimeout(retryTimer);
-              retryTimer = null;
-            }
-            setStatus("Streaming to TV", "connected");
-            updateFavicon();
+            dispatchCtl({ t: "connection-changed", phase: "connected" });
             void applyTarget(currentTarget);
-          }
-          if (state === "failed" && !retryTimer) {
-            setStatus("Connection failed — retrying…", "error");
-            updateFavicon();
-            retryTimer = setTimeout(() => {
-              retryTimer = null;
-              if (stream && receiverReady) dispatch({ t: "offer-trigger" });
-            }, 3000);
+          } else if (state === "connecting") {
+            dispatchCtl({ t: "connection-changed", phase: "connecting" });
+          } else if (state === "failed") {
+            dispatchCtl({ t: "connection-failed" });
           }
         };
         break;
@@ -449,6 +475,132 @@ function startSender(): void {
     }
   }
 
+  // ── Media lifecycle: pure controller + thin adapter ─────────────────────────
+  // The controller owns the *policy* (acquire / hot-swap / renegotiate / teardown);
+  // the negotiation reducer above is the *mechanism* it drives via `renegotiate`
+  // and `teardown-peer`. Every action result re-renders the derived view.
+  function dispatchCtl(event: SenderControllerEvent): void {
+    const { state, actions } = senderControllerReduce(ctl, event);
+    ctl = state;
+    for (const action of actions) applyCtl(action);
+    render();
+  }
+
+  function applyCtl(action: SenderControllerAction): void {
+    switch (action.t) {
+      case "acquire-capture":
+        void acquireCapture(action.gen);
+        break;
+      case "use-capture":
+        // The sole writer of the stream `create-pc` reads. Emitted immediately
+        // before `renegotiate`, so the next PC is built from this capture.
+        stream = captures.get(action.gen) ?? null;
+        break;
+      case "attach-preview":
+        attachPreview(action.gen);
+        break;
+      case "swap-tracks":
+        void swapTracks(action.gen, action.retireGen);
+        break;
+      case "stop-capture":
+        stopCapture(action.gen);
+        break;
+      case "renegotiate":
+        dispatch({ t: "offer-trigger" });
+        break;
+      case "teardown-peer":
+        dispatch({ t: "peer-gone" });
+        break;
+      case "schedule-retry":
+        if (!retryTimer)
+          retryTimer = setTimeout(() => {
+            retryTimer = null;
+            dispatchCtl({ t: "retry-fired" });
+          }, 3000);
+        break;
+      case "cancel-retry":
+        if (retryTimer) {
+          clearTimeout(retryTimer);
+          retryTimer = null;
+        }
+        break;
+    }
+  }
+
+  async function acquireCapture(gen: number): Promise<void> {
+    try {
+      const captured = await navigator.mediaDevices.getDisplayMedia({
+        video: {
+          // Capture at native (up to 4K) so a focused stream on a 4K panel can be
+          // genuinely sharp. Capture resolution doesn't affect latency, and
+          // pip/side panes are downscaled per the receiver's measured target, so
+          // this costs nothing until a stream is actually focused.
+          frameRate: { ideal: 30, max: 30 },
+          width: { ideal: 3840 },
+          height: { ideal: 2160 },
+        },
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          sampleRate: 48000,
+          channelCount: 2,
+        },
+      });
+      captures.set(gen, captured);
+      captured.getVideoTracks().forEach((t) => {
+        t.contentHint = "detail";
+      });
+      dispatchCtl({ t: "capture-acquired", gen, hasAudio: captured.getAudioTracks().length > 0 });
+    } catch (err) {
+      captures.delete(gen);
+      dispatchCtl({ t: "capture-failed", gen });
+      // Cancelling a *re-share* picker leaves the live capture untouched (the
+      // controller didn't clear it), so don't shout an error over a working
+      // share — only surface a failure when nothing is streaming.
+      if (!ctl.capture) setStatus(`Could not start screen share: ${(err as Error).message}`, "error");
+    }
+  }
+
+  function attachPreview(gen: number): void {
+    const captured = captures.get(gen);
+    if (!captured) return;
+    preview.srcObject = captured;
+    preview.classList.add("visible");
+    shareBtn.textContent = "Re-share Screen";
+    // Gen-tagged: the controller drops a stale capture's `ended` (one superseded
+    // by a re-share), so this can't tear down the live share. Only attached
+    // captures get a handler; superseded ones are simply stopped.
+    const video = captured.getVideoTracks()[0];
+    if (video) video.onended = () => dispatchCtl({ t: "capture-ended", gen });
+  }
+
+  async function swapTracks(gen: number, retireGen: number): Promise<void> {
+    const captured = captures.get(gen);
+    if (!pc || !captured) return;
+    const newVideo = captured.getVideoTracks()[0] ?? null;
+    const newAudio = captured.getAudioTracks()[0] ?? null;
+    for (const sender of pc.getSenders()) {
+      const kind = sender.track?.kind;
+      if (kind === "video" && newVideo) await sender.replaceTrack(newVideo);
+      else if (kind === "audio" && newAudio) await sender.replaceTrack(newAudio);
+    }
+    void applyTarget(currentTarget);
+    // Retire the old capture only after the swap, so the outbound stream never
+    // goes dark in the gap.
+    stopCapture(retireGen);
+  }
+
+  function stopCapture(gen: number): void {
+    const captured = captures.get(gen);
+    if (!captured) return;
+    for (const t of captured.getTracks()) {
+      t.onended = null;
+      t.stop();
+    }
+    captures.delete(gen);
+  }
+
   // Register as a sender; the hub assigns a slot and replies `assigned`. Prefer
   // our current slot across reconnects, a reload's saved slot, or a ?id= hint —
   // so we reclaim the same identity (and the hub evicts our own ghost) rather
@@ -481,8 +633,8 @@ function startSender(): void {
 
     sock.onopen = () => {
       sendRegister();
-      setStatus("Joining…");
-      updateFavicon();
+      signalingPhase = "joining";
+      render();
     };
 
     sock.onmessage = (e: MessageEvent<string>) => {
@@ -503,8 +655,8 @@ function startSender(): void {
         }
         showAssigned(msg.id);
         shareBtn.disabled = false;
-        if (!receiverReady) setStatus("Connected to server — waiting for TV receiver…");
-        updateFavicon();
+        signalingPhase = null; // hand the status over to the media view
+        render();
       }
       if (msg.type === "room-full") {
         // Don't treat this as terminal: a slot can be momentarily occupied by a
@@ -513,8 +665,8 @@ function startSender(): void {
         // frees, instead of wedging here with no Share button forever.
         myId = "";
         shareBtn.disabled = true;
-        setStatus("Two devices are already sharing to this screen — waiting for a free slot…");
-        updateFavicon();
+        signalingPhase = "room-full";
+        render();
         if (!roomFullTimer) {
           roomFullTimer = setTimeout(() => {
             roomFullTimer = null;
@@ -523,10 +675,7 @@ function startSender(): void {
         }
       }
       if (msg.type === "receiver-ready") {
-        receiverReady = true;
-        setStatus("TV receiver connected", "connected");
-        updateFavicon();
-        if (stream) dispatch({ t: "offer-trigger" });
+        dispatchCtl({ t: "receiver-ready" });
       }
       if (msg.type === "answer") {
         dispatch({ t: "answer", sdp: msg.sdp });
@@ -535,13 +684,10 @@ function startSender(): void {
         dispatch({ t: "ice", candidate: msg.candidate });
       }
       if (msg.type === "peer-disconnected") {
-        setStatus("TV disconnected — reconnecting when it returns…");
-        receiverReady = false;
-        updateFavicon();
-        dispatch({ t: "peer-gone" });
+        dispatchCtl({ t: "receiver-gone" });
       }
-      if (msg.type === "request-reoffers" && stream) {
-        dispatch({ t: "offer-trigger" });
+      if (msg.type === "request-reoffers") {
+        dispatchCtl({ t: "reoffer-requested" });
       }
       if (msg.type === "res-hint") {
         void applyTarget(msg.target);
@@ -555,107 +701,20 @@ function startSender(): void {
         clearTimeout(roomFullTimer);
         roomFullTimer = null;
       }
-      setStatus("Server disconnected — retrying in 3s…", "error");
       shareBtn.disabled = true;
-      receiverReady = false;
-      // Keep the capture + peer connection alive: media is P2P and keeps
-      // flowing to the TV while signaling is down. We re-offer on reconnect.
-      updateFavicon();
+      signalingPhase = "server-down";
+      // socket-down only clears receiverReady — it keeps the capture + peer
+      // connection alive, since media is P2P and keeps flowing to the TV while
+      // signaling is down. We re-offer when the receiver re-announces on reconnect.
+      dispatchCtl({ t: "socket-down" });
       setTimeout(connectWS, 3000);
     };
   }
 
-  shareBtn.addEventListener("click", () => {
-    void (async () => {
-      try {
-        const next = await navigator.mediaDevices.getDisplayMedia({
-          video: {
-            // Capture at native (up to 4K) so a focused stream on a 4K panel
-            // can be genuinely sharp. Capture resolution doesn't affect latency,
-            // and pip/side panes are downscaled per the receiver's measured
-            // target, so this costs nothing until a stream is actually focused.
-            frameRate: { ideal: 30, max: 30 },
-            width: { ideal: 3840 },
-            height: { ideal: 2160 },
-          },
-          audio: {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-            sampleRate: 48000,
-            channelCount: 2,
-          },
-        });
-
-        const newVideo = next.getVideoTracks()[0]!;
-        const newAudio = next.getAudioTracks()[0] ?? null;
-        newVideo.contentHint = "detail";
-
-        // Decide how to bring the new capture online. If a peer connection is
-        // already live, hot-swap the outgoing tracks in place (replaceTrack)
-        // rather than renegotiating: the receiver keeps the *same* track and
-        // video element and just starts decoding new frames, so there's no PC
-        // teardown and no blank-gray flash on the TV. We only fall back to a
-        // fresh offer when there's nothing to swap on (first share, or the
-        // receiver isn't up yet), or when the audio track's presence changed
-        // (that needs a new m-line, i.e. a real renegotiation).
-        const videoSender = pc?.getSenders().find((s) => s.track?.kind === "video") ?? null;
-        const audioSender = pc?.getSenders().find((s) => s.track?.kind === "audio") ?? null;
-        const audioUnchanged = Boolean(audioSender) === Boolean(newAudio);
-        const hotSwap =
-          pc?.connectionState === "connected" && videoSender !== null && audioUnchanged;
-
-        // The capture we're replacing. Stopped at the end, once nothing points at
-        // its tracks, so the browser drops the old "sharing" indicator — the
-        // previously-un-closed old instance.
-        const previous = stream;
-
-        stream = next;
-        preview.srcObject = next;
-        preview.classList.add("visible");
-        shareBtn.textContent = "Re-share Screen";
-
-        // Bound to this specific stream: a later re-share supersedes it, so a
-        // stale end (including the manual stop of `previous` below) can't tear
-        // down the live share — only the current stream ending does.
-        newVideo.onended = () => {
-          if (stream !== next) return;
-          setStatus("Screen share stopped");
-          stream = null;
-          preview.classList.remove("visible");
-          dispatch({ t: "peer-gone" });
-          updateFavicon();
-        };
-
-        if (hotSwap) {
-          // Swap the live senders before stopping the old tracks, so the outbound
-          // stream never goes dark in the gap.
-          await videoSender!.replaceTrack(newVideo);
-          if (audioSender && newAudio) await audioSender.replaceTrack(newAudio);
-          void applyTarget(currentTarget);
-          setStatus("Streaming to TV", "connected");
-        } else if (receiverReady) {
-          dispatch({ t: "offer-trigger" });
-        } else {
-          setStatus("Waiting for TV receiver…");
-        }
-
-        // Now that the new capture is wired in (swapped onto the live senders, or
-        // about to be added to a fresh PC by offer-trigger), stop the old one.
-        // Clear its onended first so the stop doesn't dispatch a teardown.
-        if (previous) {
-          for (const t of previous.getTracks()) {
-            t.onended = null;
-            t.stop();
-          }
-        }
-        updateFavicon();
-      } catch (err) {
-        setStatus(`Error: ${(err as Error).message}`, "error");
-        updateFavicon();
-      }
-    })();
-  });
+  // Share / Re-share. All the capture lifecycle (acquire, hot-swap vs renegotiate,
+  // retire the old capture, the gen-tagged stale-end guard) lives in the
+  // controller; the click is just the entry event.
+  shareBtn.addEventListener("click", () => dispatchCtl({ t: "share-requested" }));
 
   // Screen capture is unavailable on iOS (every browser is WebKit, which never
   // implemented getDisplayMedia) and on some others like Firefox for Android.
