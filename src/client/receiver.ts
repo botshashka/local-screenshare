@@ -94,11 +94,11 @@ updateLayoutUI();
 // toggles the corner picture, so its label is contextual to the layout.
 type ColorName = "red" | "green" | "yellow";
 const LEGEND: Record<LayoutCls, { active: ColorName; blue: string; dim?: boolean }> = {
-  "side-by-side": { active: "yellow", blue: "Show in corner", dim: true },
-  "pip-a": { active: "red", blue: "Hide Device B" },
-  "solo-a": { active: "red", blue: "Show Device B" },
-  "pip-b": { active: "green", blue: "Hide Device A" },
-  "solo-b": { active: "green", blue: "Show Device A" },
+  "side-by-side": { active: "yellow", blue: "PIP", dim: true },
+  "pip-a": { active: "red", blue: "PIP" },
+  "solo-a": { active: "red", blue: "PIP" },
+  "pip-b": { active: "green", blue: "PIP" },
+  "solo-b": { active: "green", blue: "PIP" },
 };
 
 function updateLegend(): void {
@@ -147,17 +147,23 @@ const RETRY_MS = 2000;
 // and applies its actions; see dispatchRx / applyRxCtl below.
 let rxCtl: ReceiverControllerState = initialReceiverControllerState;
 
-// Autoplay policy. A freshly (re)loaded TV page has no user activation, so an
-// UNMUTED <video> is refused play() (NotAllowedError) and the slot sits gray —
-// the TV-reload bug. We start every video MUTED (muted playback is always
-// allowed, so video is never gray) and unmute on the first real user gesture
-// (remote keypress / click / touch), after which audio plays too. mousemove is
-// NOT a gesture for autoplay, so it can't be used here.
+// Autoplay policy. We want sound the instant a stream arrives — no tap. So we
+// play OPTIMISTICALLY UNMUTED first: on platforms that permit autoplay-with-
+// sound (high media-engagement, installed/kiosk apps, smart-TV browsers, or
+// Chrome launched with --autoplay-policy=no-user-gesture-required) audio just
+// works. Only if the browser actually refuses an unmuted play() (NotAllowedError
+// — the TV-reload gray-screen cause) do we fall back to MUTED playback (always
+// allowed, so the slot is never gray) and unmute on the first real user gesture
+// (remote keypress / click / touch). mousemove is NOT a gesture for autoplay.
 let userInteracted = false;
+// Latched once an unmuted play() is refused this load, so subsequent slots go
+// straight to muted instead of each re-triggering a refusal. Cleared by a gesture.
+let soundBlocked = false;
 const GESTURES = ["pointerdown", "keydown", "touchstart"] as const;
 function onFirstGesture(): void {
   if (userInteracted) return;
   userInteracted = true;
+  soundBlocked = false;
   for (const evt of GESTURES) document.removeEventListener(evt, onFirstGesture);
   for (const v of Object.values(videos)) {
     v.muted = false;
@@ -165,6 +171,24 @@ function onFirstGesture(): void {
   }
 }
 for (const evt of GESTURES) document.addEventListener(evt, onFirstGesture);
+
+// Play a slot's video preferring sound. Tries unmuted; if the autoplay policy
+// refuses, downgrades that element to muted (so video still shows) and latches
+// soundBlocked so onFirstGesture knows to unmute on the next interaction.
+function playWithSound(video: HTMLVideoElement): void {
+  if (soundBlocked && !userInteracted) {
+    // Already know sound is blocked this load — don't re-trigger a refusal.
+    video.muted = true;
+    void video.play().catch(() => {});
+    return;
+  }
+  video.muted = false;
+  video.play().catch(() => {
+    soundBlocked = true;
+    video.muted = true;
+    void video.play().catch(() => {});
+  });
+}
 
 // ── Room ─────────────────────────────────────────────────────────────────────
 // Rooms exist only to isolate tenants on a shared public hub. A co-located
@@ -518,10 +542,9 @@ function createPC(senderId: string, gen: number): RTCPeerConnection {
     // so the native play-icon placeholder never flashes.
     for (const t of stream.getTracks()) if (t.kind === e.track.kind) stream.removeTrack(t);
     stream.addTrack(e.track);
-    // Muted until the user has interacted, so play() is never refused (the gray-
-    // screen cause); onFirstGesture unmutes once activation exists.
-    video.muted = !userInteracted;
-    void video.play().catch(() => {});
+    // Prefer sound immediately; falls back to muted (never gray) only if the
+    // browser refuses unmuted autoplay, then onFirstGesture unmutes on a gesture.
+    playWithSound(video);
     const rvfc = (
       video as HTMLVideoElement & { requestVideoFrameCallback?: (cb: () => void) => void }
     ).requestVideoFrameCallback;
