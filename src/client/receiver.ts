@@ -253,7 +253,7 @@ function renderRoomPanel(): void {
       e.preventDefault();
       const code = coerceRoomCode(joinInput.value);
       if (!code) {
-        if (joinErr) joinErr.textContent = "Enter the 8-character code shown on the other screen.";
+        if (joinErr) joinErr.textContent = "Enter the 4-character code shown on the other screen.";
         return;
       }
       if (code === room) {

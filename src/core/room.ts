@@ -17,11 +17,13 @@
 export const SENDER_IDS = ["device-a", "device-b"] as const;
 export const RECEIVER = "receiver";
 
-// A public hub is multi-tenant: one room per code, and the code is the only access
-// gate — hence high entropy and an unambiguous alphabet (no 0/1/I/L/O). Length is
-// fixed at 8, so the validation regex is derived from the alphabet+length.
+// The code is NOT the sole access gate: the Worker namespaces each code by the
+// client's network (CF-Connecting-IP), so it's only shared among same-LAN devices.
+// That lets it be short — 4 chars over a 31-char unambiguous alphabet (no 0/1/I/L/O)
+// is ~20 bits, ample for the small home networks this targets. Length is fixed, so
+// the regex derives from the alphabet+length.
 export const ROOM_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
-export const ROOM_LEN = 8;
+export const ROOM_LEN = 4;
 export const ROOM_RE = new RegExp(`^[${ROOM_ALPHABET}]{${ROOM_LEN}}$`);
 
 // Liveness: clients ping on HB_INTERVAL_MS; any socket silent past HB_TIMEOUT_MS is

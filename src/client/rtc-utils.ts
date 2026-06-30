@@ -184,12 +184,13 @@ export function trackConnectionLiveness(opts: { graceMs?: number; onLost: () => 
 }
 
 // ── Room codes ─────────────────────────────────────────────────────────────
-// A public hub is multi-tenant: one signaling room per code keeps each
-// household's signaling isolated, so the code is also the only access gate —
-// hence high entropy and an unambiguous alphabet (no 0/1/I/L/O) for codes that
-// are scanned via QR but can also be read off a TV and typed without confusion.
+// The code is NOT the sole access gate: the Worker namespaces each code by the
+// client's network (CF-Connecting-IP), so it's only shared among same-LAN devices —
+// which lets it stay short (a few chars from an unambiguous alphabet, no 0/1/I/L/O,
+// read off a TV, typed, or scanned). Built for small home networks: a convenience
+// gate among your own devices, not a boundary against shared/CGNAT egress.
 export const ROOM_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
-const ROOM_LEN = 8;
+const ROOM_LEN = 4;
 // Validation length is tied to the generated length: every real code is exactly
 // ROOM_LEN chars, so accepting any other length just invites typos. (The Worker
 // keeps a copy of this pattern — see test/signaling.test.ts for the drift guard.)
@@ -218,8 +219,8 @@ export function persistRoomInUrl(room: string): void {
   history.replaceState(null, "", url);
 }
 
-// ~40 bits of entropy. The modulo over a 31-char alphabet adds negligible bias
-// for an access code of this size.
+// ~20 bits, scoped per-network by the Worker — on a home LAN only your own devices
+// share the space. The modulo over a 31-char alphabet adds negligible bias here.
 export function generateRoomCode(): string {
   const bytes = new Uint8Array(ROOM_LEN);
   crypto.getRandomValues(bytes);

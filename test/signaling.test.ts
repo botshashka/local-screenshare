@@ -97,36 +97,36 @@ describe("signalingHost precedence", () => {
 });
 
 describe("room codes", () => {
-  it("accepts well-formed 8-char codes case-insensitively", () => {
-    expect(isValidRoomCode("ABCD2345")).toBe(true);
-    expect(isValidRoomCode("k7p2q9ab")).toBe(true);
+  it("accepts well-formed 4-char codes case-insensitively", () => {
+    expect(isValidRoomCode("K7P3")).toBe(true);
+    expect(isValidRoomCode("k7p3")).toBe(true);
   });
 
   it("rejects ambiguous chars, wrong length, and nullish input", () => {
-    expect(isValidRoomCode("ABCD0O1I")).toBe(false); // 0 O 1 I are not in the alphabet
-    expect(isValidRoomCode("ABC234")).toBe(false); // 6 chars — only exactly 8 is valid
-    expect(isValidRoomCode("ABCD23456")).toBe(false); // 9 chars
+    expect(isValidRoomCode("0O1I")).toBe(false); // 0 O 1 I are not in the alphabet
+    expect(isValidRoomCode("ABC")).toBe(false); // 3 chars — only exactly 4 is valid
+    expect(isValidRoomCode("ABCD2")).toBe(false); // 5 chars
     expect(isValidRoomCode("")).toBe(false);
     expect(isValidRoomCode(null)).toBe(false);
     expect(isValidRoomCode(undefined)).toBe(false);
   });
 
   it("normalizes by trimming and upper-casing", () => {
-    expect(normalizeRoomCode("  abcd2345  ")).toBe("ABCD2345");
+    expect(normalizeRoomCode("  k7p3  ")).toBe("K7P3");
   });
 
   it("coerces a valid candidate to a normalized code, else null", () => {
-    expect(coerceRoomCode("  abcd2345 ")).toBe("ABCD2345");
-    expect(coerceRoomCode("nope")).toBeNull();
+    expect(coerceRoomCode("  k7p3 ")).toBe("K7P3");
+    expect(coerceRoomCode("nope")).toBeNull(); // O is not in the alphabet
     expect(coerceRoomCode(null)).toBeNull();
     // Enables flat fallback resolution.
-    expect(coerceRoomCode("bad") ?? coerceRoomCode("ABCD2345") ?? "gen").toBe("ABCD2345");
+    expect(coerceRoomCode("bad") ?? coerceRoomCode("K7P3") ?? "gen").toBe("K7P3");
   });
 
-  it("generates valid 8-char codes from the unambiguous alphabet", () => {
+  it("generates valid 4-char codes from the unambiguous alphabet", () => {
     for (let i = 0; i < 50; i++) {
       const code = generateRoomCode();
-      expect(code).toHaveLength(8);
+      expect(code).toHaveLength(4);
       expect(isValidRoomCode(code)).toBe(true);
       for (const ch of code) expect(ROOM_ALPHABET).toContain(ch);
     }
@@ -145,6 +145,6 @@ describe("room codes", () => {
     const ok = generateRoomCode();
     expect(core.ROOM_RE.test(ok)).toBe(isValidRoomCode(ok));
     expect(core.ROOM_RE.test("short")).toBe(false);
-    expect(core.ROOM_RE.test("00000000")).toBe(false); // ambiguous chars excluded
+    expect(core.ROOM_RE.test("0000")).toBe(false); // ambiguous chars excluded
   });
 });

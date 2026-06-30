@@ -133,7 +133,9 @@ They're independent; you rarely deploy both at once.
 
 ### Joining (rooms)
 
-The **TV** generates an unguessable room code on load and shows it with a **QR code** and a join link. On a phone or laptop, **scan the QR** (or open `…/sender.html?room=CODE`) to land on the sender page already paired to that TV — it's auto-assigned the next free slot, so just hit Share Screen. Prefer typing? The sender page has a join-code box. The code is remembered on the TV across reloads, so senders stay paired. The full join panel hides once a device is streaming, but the empty pane keeps showing its own QR + code so a second person can still scan in.
+The **TV** generates a short room code on load and shows it with a **QR code** and a join link. On a phone or laptop, **scan the QR** (or open `…/sender.html?room=CODE`) to land on the sender page already paired to that TV — it's auto-assigned the next free slot, so just hit Share Screen. Prefer typing? The sender page has a join-code box. The code is remembered on the TV across reloads, so senders stay paired. The full join panel hides once a device is streaming, but the empty pane keeps showing its own QR + code so a second person can still scan in.
+
+> **Scope:** screenshare is built for **small home networks**. On the hosted hub the code is namespaced by your network (the Worker keys it by `CF-Connecting-IP`), so it only pairs devices on the same LAN — which is why a 4-character code is enough. It's a convenience gate among your own devices, **not** a security boundary: don't rely on it to keep strangers out on a large shared or carrier-NAT (CGNAT) network, where many unrelated LANs can share one egress IP.
 
 ## Quality & performance
 
@@ -172,6 +174,6 @@ The optional serverless signaling hub is a separate self-contained project under
 The signaling layer handles **signaling only** — no media passes through it. Video and audio stream directly between sender and receiver via WebRTC (VP9, with the per-stream resolution and bitrate driven by the receiver's measured pane sizes and the sender's quality preset — see [Quality & performance](#quality--performance)). Two ways to run that signaling layer:
 
 - **Local (`server.ts`)** — the Node server listens on both HTTPS (senders) and HTTP (the TV receiver) sharing one WebSocket hub, so an `http`-origin receiver and `https`-origin senders pair over the same channel. The self-signed TLS cert is generated once on first run and persisted in `.certs/`. Best for an isolated/offline LAN. It's a single global hub, so the room code is ignored.
-- **Hosted hub** — any WebSocket host that routes `wss://…/ws?room=CODE` to a per-room hub instance, keeping households isolated. A ready-made Cloudflare Worker + Durable Object implementation ships in `worker/src/signaling.ts`. Real TLS, zero install. See [Hosting it](#hosting-it-zero-install).
+- **Hosted hub** — any WebSocket host that routes `wss://…/ws?room=CODE` to a per-room hub instance. A ready-made Cloudflare Worker + Durable Object implementation ships in `worker/src/signaling.ts`; it namespaces each code by the client's network (CF-Connecting-IP), so a code is only shared among devices on the same LAN — that network scoping is what lets the code stay short. Real TLS, zero install. See [Hosting it](#hosting-it-zero-install).
 
 The same client bundles drive both: the page resolves its signaling endpoint from `?hub=` → the build-time `SIGNALING_HUB` (baked into `js/config.js`) → `<meta name="signaling-hub">` → its own origin, so a remotely-served page targets your hub while a `server.ts`-served page stays same-origin. Either way, media stays on the local network — STUN only assists the handshake and no TURN means video is never relayed.

@@ -26,24 +26,28 @@ interface Client {
 const open: Client[] = [];
 
 // A distinct valid room code per test, so each maps to a fresh DO instance and
-// no leftover sockets from a prior test bleed in. Any 8 chars from the alphabet
+// no leftover sockets from a prior test bleed in. Any 4 chars from the alphabet
 // satisfy the Worker's ROOM_RE.
 const ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
 let roomCounter = 0;
 function freshRoom(): string {
   let x = ++roomCounter;
   let code = "";
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 4; i++) {
     code += ALPHABET[x % ALPHABET.length];
     x = Math.floor(x / ALPHABET.length) + 7; // keep digits varied across i
   }
   return code;
 }
 
-async function connect(room: string): Promise<Client> {
-  const res = await SELF.fetch(`https://hub.test/ws?room=${room}`, {
-    headers: { Upgrade: "websocket" },
-  });
+// `ip`, when given, is sent as CF-Connecting-IP — the Worker namespaces each room
+// code by it, so two connections to the same code with different IPs land in
+// different DOs (distinct LANs). Omitting it leaves connections in the shared
+// `noip` scope, kept apart only by distinct codes.
+async function connect(room: string, ip?: string): Promise<Client> {
+  const headers: Record<string, string> = { Upgrade: "websocket" };
+  if (ip) headers["CF-Connecting-IP"] = ip;
+  const res = await SELF.fetch(`https://hub.test/ws?room=${room}`, { headers });
   const ws = (res as unknown as { webSocket: WebSocket | null }).webSocket;
   if (!ws) throw new Error(`expected a WebSocket upgrade, got status ${res.status}`);
   ws.accept();
@@ -119,7 +123,7 @@ describe("fetch routing", () => {
   });
 
   it("426s a /ws request without the websocket upgrade header", async () => {
-    const res = await SELF.fetch("https://hub.test/ws?room=ABCD2345");
+    const res = await SELF.fetch("https://hub.test/ws?room=K7P3");
     expect(res.status).toBe(426);
   });
 
@@ -173,6 +177,43 @@ describe("slot assignment", () => {
     const b = await connect(freshRoom());
     b.send({ type: "register", role: "sender" });
     expect((await b.next("assigned")).id).toBe("device-a");
+  });
+
+  it("isolates by network: same code from different egress IPs are independent hubs", async () => {
+    const room = freshRoom();
+    const a = await connect(room, "203.0.113.1");
+    a.send({ type: "register", role: "sender" });
+    expect((await a.next("assigned")).id).toBe("device-a");
+    // Same code, different LAN — its first sender is also device-a (separate DO).
+    const b = await connect(room, "198.51.100.2");
+    b.send({ type: "register", role: "sender" });
+    expect((await b.next("assigned")).id).toBe("device-a");
+  });
+
+  it("shares a hub for the same code from the same egress IP", async () => {
+    const room = freshRoom();
+    const a = await connect(room, "203.0.113.1");
+    a.send({ type: "register", role: "sender" });
+    expect((await a.next("assigned")).id).toBe("device-a");
+    // Same LAN, same code — a second sender slots in beside the first.
+    const b = await connect(room, "203.0.113.1");
+    b.send({ type: "register", role: "sender" });
+    expect((await b.next("assigned")).id).toBe("device-b");
+  });
+
+  it("groups IPv6 by /64: same prefix shares a hub, different prefix does not", async () => {
+    const room = freshRoom();
+    // Two devices on one LAN's /64 (distinct addresses within it) → same hub.
+    const a = await connect(room, "2001:db8:1:2::a");
+    a.send({ type: "register", role: "sender" });
+    expect((await a.next("assigned")).id).toBe("device-a");
+    const b = await connect(room, "2001:db8:1:2:abcd::1");
+    b.send({ type: "register", role: "sender" });
+    expect((await b.next("assigned")).id).toBe("device-b");
+    // A different /64 with the same code → independent hub (device-a again).
+    const c = await connect(room, "2001:db8:9:9::a");
+    c.send({ type: "register", role: "sender" });
+    expect((await c.next("assigned")).id).toBe("device-a");
   });
 });
 
