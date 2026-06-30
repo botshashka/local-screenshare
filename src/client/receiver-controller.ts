@@ -14,11 +14,13 @@
 //
 // THE INVARIANT this module makes a tested rule rather than a comment: a slot's
 // <video>.srcObject is nulled in EXACTLY ONE place — `peer-disconnected` (the hub
-// says the sender truly left) — and reset to a fresh MediaStream in exactly one
-// place — `offer-arrived` (a rebuild). It is NEVER touched on a transient
-// connection drop or liveness loss, because when ICE self-heals the SAME track
-// resumes and `ontrack` does not fire again; nulling on a flap would strand the
-// slot blank until reload. The provenance tests assert these biconditionals.
+// says the sender truly left) — and (re)prepared in exactly one place —
+// `offer-arrived` (a rebuild). It is NEVER touched on a transient connection drop
+// or liveness loss, because when ICE self-heals the SAME track resumes and
+// `ontrack` does not fire again; nulling on a flap would strand the slot blank
+// until reload. The provenance tests assert these biconditionals. On a rebuild
+// the adapter keeps the existing stream (last frame frozen) and lets `ontrack`
+// swap the fresh track in, so a re-offer never flashes the frameless placeholder.
 //
 // `revealed` is a UI latch (the slot's "connected" state): set on the first
 // decoded frame of the current gen, cleared only on a real loss
@@ -88,7 +90,7 @@ export type ReceiverControllerEvent =
   | { t: "peer-disconnected"; id: string };
 
 export type ReceiverControllerAction =
-  // Fresh MediaStream for the slot's <video>. ONLY from offer-arrived.
+  // Prepare the slot's <video> source for a rebuild. ONLY from offer-arrived.
   | { t: "reset-srcobject"; id: string }
   // <video>.srcObject = null. ONLY from peer-disconnected. THE single nulling.
   | { t: "null-srcobject"; id: string }

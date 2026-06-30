@@ -508,12 +508,16 @@ function createPC(senderId: string, gen: number): RTCPeerConnection {
 
   pc.ontrack = (e) => {
     const video = videos[senderId];
-    // Drop a stale PC's track, and NEVER recreate a nulled srcObject (the H3
-    // invariant): after offer-arrived's reset-srcobject, srcObject is a fresh
-    // non-null stream before any track arrives, so null here means the slot was
-    // torn down by peer-disconnected and must stay torn down.
+    // Drop a stale PC's track; null srcObject means peer-disconnected tore the
+    // slot down (the H3 invariant) — stay torn down.
     if (!video || pcs[senderId] !== pc || !video.srcObject) return;
-    (video.srcObject as MediaStream).addTrack(e.track);
+    const stream = video.srcObject as MediaStream;
+    // Swap the track in place (drop the prior same-kind track, add the new one in
+    // the same task) so the element never holds an empty stream. On a rebuild this
+    // cuts from the frozen last frame straight to the new one — no frameless gap,
+    // so the native play-icon placeholder never flashes.
+    for (const t of stream.getTracks()) if (t.kind === e.track.kind) stream.removeTrack(t);
+    stream.addTrack(e.track);
     // Muted until the user has interacted, so play() is never refused (the gray-
     // screen cause); onFirstGesture unmutes once activation exists.
     video.muted = !userInteracted;
@@ -617,10 +621,12 @@ function dispatchRx(event: ReceiverControllerEvent): void {
 function applyRxCtl(action: ReceiverControllerAction): void {
   switch (action.t) {
     case "reset-srcobject": {
-      // The ONE place a fresh stream is set (a rebuild). Runs before the new PC's
-      // ontrack, so the element always has a non-null stream to append into.
+      // Rebuild: keep the current stream (its last frame frozen on the now-ended
+      // track) so the slot doesn't flash the frameless placeholder; ontrack swaps
+      // the fresh track in. Mint a stream only when there's none (first build, or
+      // after peer-disconnected nulled it).
       const video = videos[action.id];
-      if (video) video.srcObject = new MediaStream();
+      if (video && !video.srcObject) video.srcObject = new MediaStream();
       break;
     }
     case "null-srcobject": {
