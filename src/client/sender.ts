@@ -179,7 +179,7 @@ function startSender(): void {
 
   const statusEl = document.getElementById("status") as HTMLElement;
   const statusText = document.getElementById("statusText") as HTMLElement;
-  const shareBtn = document.getElementById("shareBtn") as HTMLButtonElement;
+  const castBtn = document.getElementById("castBtn") as HTMLButtonElement;
   const preview = document.getElementById("preview") as HTMLVideoElement;
 
   function setStatus(msg: string, cls: StatusClass = ""): void {
@@ -502,7 +502,7 @@ function startSender(): void {
       case "detach-preview":
         preview.classList.remove("visible");
         preview.srcObject = null;
-        shareBtn.textContent = "Share Screen";
+        castBtn.textContent = "Share Screen";
         break;
       case "swap-tracks":
         void swapTracks(action.gen, action.retireGen);
@@ -576,7 +576,7 @@ function startSender(): void {
     if (!captured) return;
     preview.srcObject = captured;
     preview.classList.add("visible");
-    shareBtn.textContent = "Re-share Screen";
+    castBtn.textContent = "Re-share Screen";
     // Gen-tagged: the controller drops a stale capture's `ended` (one superseded
     // by a re-share), so this can't tear down the live share. Only attached
     // captures get a handler; superseded ones are simply stopped.
@@ -668,7 +668,7 @@ function startSender(): void {
           roomFullTimer = null;
         }
         showAssigned(msg.id);
-        shareBtn.disabled = false;
+        castBtn.disabled = false;
         signalingPhase = null; // hand the status over to the media view
         render();
       }
@@ -678,7 +678,7 @@ function startSender(): void {
         // hasn't reaped yet). Keep re-registering so we slot in as soon as one
         // frees, instead of wedging here with no Share button forever.
         myId = "";
-        shareBtn.disabled = true;
+        castBtn.disabled = true;
         signalingPhase = "room-full";
         render();
         if (!roomFullTimer) {
@@ -715,7 +715,7 @@ function startSender(): void {
         clearTimeout(roomFullTimer);
         roomFullTimer = null;
       }
-      shareBtn.disabled = true;
+      castBtn.disabled = true;
       signalingPhase = "server-down";
       // socket-down only clears receiverReady — it keeps the capture + peer
       // connection alive, since media is P2P and keeps flowing to the TV while
@@ -728,14 +728,14 @@ function startSender(): void {
   // Share / Re-share. All the capture lifecycle (acquire, hot-swap vs renegotiate,
   // retire the old capture, the gen-tagged stale-end guard) lives in the
   // controller; the click is just the entry event.
-  shareBtn.addEventListener("click", () => dispatchCtl({ t: "share-requested" }));
+  castBtn.addEventListener("click", () => dispatchCtl({ t: "share-requested" }));
 
   // Screen capture is unavailable on iOS (every browser is WebKit, which never
   // implemented getDisplayMedia) and on some others like Firefox for Android.
   // Detect it up front so unsupported devices get a clear message instead of a
   // raw "getDisplayMedia is not a function" error after tapping Share Screen.
   if (typeof navigator.mediaDevices?.getDisplayMedia !== "function") {
-    shareBtn.disabled = true;
+    castBtn.disabled = true;
     setStatus(
       "This device or browser doesn't support screen sharing. Use a computer (or Android Chrome) as the sender.",
       "error",

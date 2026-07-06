@@ -127,7 +127,7 @@
   .status.error .dot { background: #f87171; }
 
   /* Primary action */
-  .share-btn {
+  .cast-btn {
     width: 100%;
     background: #2563eb;
     color: #fff;
@@ -139,8 +139,8 @@
     cursor: pointer;
     transition: background 0.15s;
   }
-  .share-btn:hover:not(:disabled) { background: #1d4ed8; }
-  .share-btn:disabled { background: #262626; color: #666; cursor: default; }
+  .cast-btn:hover:not(:disabled) { background: #1d4ed8; }
+  .cast-btn:disabled { background: #262626; color: #666; cursor: default; }
 
   /* ── Quality segmented control ── */
   .quality { width: 100%; display: flex; flex-direction: column; gap: 9px; }
@@ -224,7 +224,7 @@
     <div class="join-title">Enter the code shown on your TV</div>
     <input id="roomInput" class="join-input" type="text" inputmode="text" autocomplete="off"
            autocapitalize="characters" spellcheck="false" maxlength="4" placeholder="K7P3">
-    <button id="roomJoin" class="share-btn">Join</button>
+    <button id="roomJoin" class="cast-btn">Join</button>
     <div id="joinError" class="join-error"></div>
   </div>
 </div>
@@ -234,7 +234,7 @@
   <div class="status" id="status">
     <span class="dot"></span><span id="statusText">Connecting to server…</span>
   </div>
-  <button id="shareBtn" class="share-btn" disabled>Share Screen</button>
+  <button id="castBtn" class="cast-btn" disabled>Share Screen</button>
   <div class="quality">
     <span class="quality-label">Quality</span>
     <div class="segmented" id="qualitySeg" role="group" aria-label="Quality">
