@@ -169,6 +169,10 @@ function onFirstGesture(): void {
     v.muted = false;
     void v.play().catch(() => {});
   }
+  // This gesture is also our first chance to satisfy the Fullscreen API's
+  // gesture requirement — enter now (unless the user opted out) so the display
+  // fills the panel without a separate tap. Defined below; hoisted.
+  autoEnterFullscreen();
 }
 for (const evt of GESTURES) document.addEventListener(evt, onFirstGesture);
 
@@ -452,6 +456,70 @@ function revealSlot(id: string): void {
 
 layoutBtn?.addEventListener("click", cycleLayout);
 
+// ── Fullscreen ──────────────────────────────────────────────────────────────
+// The receiver is a second-screen/TV display, so filling the panel (hiding the
+// browser's chrome) is almost always what's wanted. Toggle via the button, the F
+// key, or — since requestFullscreen needs a user gesture and can't fire on load —
+// automatically on the FIRST gesture of the session (see onFirstGesture). Leaving
+// fullscreen by any means (button, F, Esc) latches an opt-out so we stop
+// auto-entering on later loads; re-entering manually clears it.
+const fullscreenBtn = document.getElementById("fullscreenBtn");
+type FsDoc = Document & { webkitFullscreenElement?: Element; webkitExitFullscreen?: () => void };
+type FsEl = HTMLElement & { webkitRequestFullscreen?: () => void };
+const fsRoot = document.documentElement as FsEl;
+const fullscreenSupported = !!(fsRoot.requestFullscreen ?? fsRoot.webkitRequestFullscreen);
+
+function inFullscreen(): boolean {
+  const d = document as FsDoc;
+  return !!(d.fullscreenElement ?? d.webkitFullscreenElement);
+}
+function enterFullscreen(): void {
+  const req = fsRoot.requestFullscreen ?? fsRoot.webkitRequestFullscreen;
+  if (!req) return;
+  try {
+    const r = req.call(fsRoot) as unknown;
+    if (r && typeof (r as Promise<void>).catch === "function") (r as Promise<void>).catch(() => {});
+  } catch {
+    // no gesture / not permitted — the button and F key remain available
+  }
+}
+function exitFullscreen(): void {
+  const d = document as FsDoc;
+  const exit = d.exitFullscreen ?? d.webkitExitFullscreen;
+  if (!exit) return;
+  try {
+    exit.call(d);
+  } catch {
+    // already exiting
+  }
+}
+function toggleFullscreen(): void {
+  if (inFullscreen()) exitFullscreen();
+  else enterFullscreen();
+}
+// Enter fullscreen unless the user has previously opted out this device.
+function autoEnterFullscreen(): void {
+  if (!fullscreenSupported || inFullscreen()) return;
+  if (localStorage.getItem("fsOptOut") === "1") return;
+  enterFullscreen();
+}
+let wasFullscreen = false;
+function syncFullscreenUI(): void {
+  const now = inFullscreen();
+  document.body.classList.toggle("fullscreen", now);
+  // Leaving fullscreen (Esc, the button, F) means the user doesn't want it —
+  // remember that so we don't fight them on the next load. Entering clears it.
+  if (wasFullscreen && !now) localStorage.setItem("fsOptOut", "1");
+  else if (now) localStorage.removeItem("fsOptOut");
+  wasFullscreen = now;
+}
+if (fullscreenBtn) {
+  if (!fullscreenSupported) fullscreenBtn.classList.add("unsupported");
+  else fullscreenBtn.addEventListener("click", toggleFullscreen);
+}
+document.addEventListener("fullscreenchange", syncFullscreenUI);
+document.addEventListener("webkitfullscreenchange", syncFullscreenUI as EventListener);
+
 // TV remote color buttons drive direct selection, with r/g/y/b as desktop
 // equivalents. e.key carries "ColorFxName" on modern firmware; keyCode 403–406
 // is the fallback for sets that don't.
@@ -469,6 +537,11 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "l" || e.key === "L" || e.key === " ") {
     e.preventDefault();
     cycleLayout();
+    return;
+  }
+  if (e.key === "f" || e.key === "F") {
+    e.preventDefault();
+    toggleFullscreen();
     return;
   }
   const letter = e.key.length === 1 ? e.key.toLowerCase() : e.key;
