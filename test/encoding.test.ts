@@ -125,16 +125,16 @@ describe("adaptStep", () => {
 describe("tweakSdp", () => {
   const sdp = [
     "v=0",
-    "m=video 9 UDP/TLS/RTP/SAVPF 96 98 100",
-    "a=rtpmap:96 H264/90000",
+    "m=video 9 UDP/TLS/RTP/SAVPF 98 96 100",
     "a=rtpmap:98 VP9/90000",
-    "a=rtpmap:100 VP9/90000",
+    "a=rtpmap:96 H264/90000",
+    "a=rtpmap:100 H264/90000",
     "a=rtpmap:111 opus/48000/2",
     "a=fmtp:111 minptime=10;useinbandfec=1",
   ].join("\r\n");
 
-  it("promotes VP9 payload types to the front of the m=video line", () => {
-    expect(tweakSdp(sdp)).toContain("m=video 9 UDP/TLS/RTP/SAVPF 98 100 96");
+  it("promotes H.264 payload types to the front of the m=video line", () => {
+    expect(tweakSdp(sdp)).toContain("m=video 9 UDP/TLS/RTP/SAVPF 96 100 98");
   });
 
   it("rewrites the opus fmtp for stereo, high-bitrate audio", () => {
@@ -148,8 +148,8 @@ describe("tweakSdp", () => {
     expect(tweakSdp(sdp, true)).toContain("b=AS:6000");
   });
 
-  it("leaves a VP9-less m=video line untouched", () => {
-    const noVp9 = "m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=rtpmap:96 H264/90000";
-    expect(tweakSdp(noVp9)).toContain("m=video 9 UDP/TLS/RTP/SAVPF 96");
+  it("leaves an H.264-less m=video line untouched", () => {
+    const noH264 = "m=video 9 UDP/TLS/RTP/SAVPF 98\r\na=rtpmap:98 VP9/90000";
+    expect(tweakSdp(noH264)).toContain("m=video 9 UDP/TLS/RTP/SAVPF 98");
   });
 });

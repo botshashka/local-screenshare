@@ -389,15 +389,24 @@ export function adaptStep(state: AdaptState, cpuFraction: number, ceilingRung: n
 }
 
 // addBandwidthHint=true only for offers — b=AS:6000 is set by the offering side.
+//
+// We promote H.264 to the front of the m=video payload list rather than VP9.
+// The sender is the offerer, so this ordering is what the negotiated send codec
+// follows — and H.264 is the one video codec every receiver decodes in hardware.
+// Samsung Tizen TV browsers, in particular, advertise VP9 in their answer but
+// have no working VP9 WebRTC decode: negotiate VP9 to such a receiver and the
+// connection comes up cleanly while the picture stays black. H.264 costs a little
+// bitrate efficiency vs VP9, but media never leaves the LAN here (STUN-only, no
+// TURN), so that's a non-issue — reliable playback on TVs is the whole point.
 export function tweakSdp(sdp: string, addBandwidthHint = false): string {
-  const vp9Pts = [...sdp.matchAll(/a=rtpmap:(\d+) VP9\/90000/gi)]
+  const h264Pts = [...sdp.matchAll(/a=rtpmap:(\d+) H264\/90000/gi)]
     .map((m) => m[1])
     .filter((x): x is string => x !== undefined);
 
-  if (vp9Pts.length) {
+  if (h264Pts.length) {
     sdp = sdp.replace(/^(m=video \S+ \S+ )([^\r\n]+)/m, (_, header: string, ptList: string) => {
       const pts = ptList.trim().split(" ");
-      const reordered = [...vp9Pts, ...pts.filter((p) => !vp9Pts.includes(p))];
+      const reordered = [...h264Pts, ...pts.filter((p) => !h264Pts.includes(p))];
       return `${header}${reordered.join(" ")}`;
     });
   }

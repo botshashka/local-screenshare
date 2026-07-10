@@ -55,7 +55,7 @@ export type SenderAction =
   // Close any prior PC and build a fresh one (addTrack the current stream).
   | { t: "create-pc"; epoch: Epoch }
   | { t: "create-offer"; epoch: Epoch }
-  // Already tweakSdp'd (VP9 ordering + bandwidth hint) — the adapter just sends it.
+  // Already tweakSdp'd (H.264 ordering + bandwidth hint) — the adapter just sends it.
   | { t: "send-offer"; epoch: Epoch; sdp: string }
   | { t: "set-remote"; epoch: Epoch; sdp: string }
   | { t: "add-ice"; epoch: Epoch; candidate: RTCIceCandidateInit }
@@ -84,7 +84,7 @@ export function senderReduce(state: SenderState, event: SenderEvent): Result {
 
     case "offer-created": {
       if (!isCurrentEpoch(state.peer ?? undefined, event.epoch)) return { state, actions: [] };
-      // tweakSdp(..., true) sets the offer-side bandwidth hint and VP9 ordering.
+      // tweakSdp(..., true) sets the offer-side bandwidth hint and H.264 ordering.
       return {
         state,
         actions: [{ t: "send-offer", epoch: event.epoch, sdp: tweakSdp(event.sdp, true) }],

@@ -42,14 +42,14 @@ describe("senderReduce — offer triggers", () => {
     expect(actionsFor(state, { t: "offer-created", epoch: stale, sdp: "x" })).toEqual([]);
   });
 
-  it("sends the current offer with VP9 ordering + bandwidth hint applied", () => {
+  it("sends the current offer with H.264 ordering + bandwidth hint applied", () => {
     let state = drive(initialSenderState, { t: "offer-trigger" });
     const epoch = epochOf(state);
-    const rawSdp = "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96 98\r\na=rtpmap:98 VP9/90000\r\n";
+    const rawSdp = "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 98 96\r\na=rtpmap:96 H264/90000\r\n";
     const { actions } = senderReduce(state, { t: "offer-created", epoch, sdp: rawSdp });
     const send = actions.find((a) => a.t === "send-offer");
     expect(send && send.t === "send-offer" && send.sdp).toContain(
-      "m=video 9 UDP/TLS/RTP/SAVPF 98 96",
+      "m=video 9 UDP/TLS/RTP/SAVPF 96 98",
     );
     expect(send && send.t === "send-offer" && send.sdp).toContain("b=AS:6000"); // offer-side hint
   });

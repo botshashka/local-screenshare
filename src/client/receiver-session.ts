@@ -131,7 +131,7 @@ export function receiverReduce(state: ReceiverState, event: ReceiverEvent): Resu
     case "answer-created": {
       const existing = state.peers[event.id];
       if (!isCurrentEpoch(existing, event.epoch)) return { state, actions: [] };
-      // tweakSdp here keeps the on-wire answer (VP9 ordering, opus fmtp) under test.
+      // tweakSdp here keeps the on-wire answer (H.264 ordering, opus fmtp) under test.
       return {
         state,
         actions: [{ t: "send-answer", id: event.id, epoch: event.epoch, sdp: tweakSdp(event.sdp) }],

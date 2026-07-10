@@ -121,8 +121,8 @@ describe("receiverReduce — stale epoch guard", () => {
     const epoch = epochOf(state, "device-a");
     state = drive(state, { t: "remote-set", id: "device-a", epoch });
 
-    // An answer SDP advertising VP9 should come back with VP9 promoted on m=video.
-    const rawSdp = "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96 98\r\na=rtpmap:98 VP9/90000\r\n";
+    // An answer SDP advertising H.264 should come back with H.264 promoted on m=video.
+    const rawSdp = "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 98 96\r\na=rtpmap:96 H264/90000\r\n";
     const { actions } = receiverReduce(state, {
       t: "answer-created",
       id: "device-a",
@@ -131,7 +131,7 @@ describe("receiverReduce — stale epoch guard", () => {
     });
     const send = actions.find((a) => a.t === "send-answer");
     expect(send).toBeDefined();
-    expect(send && send.t === "send-answer" && send.sdp).toContain("m=video 9 UDP/TLS/RTP/SAVPF 98 96");
+    expect(send && send.t === "send-answer" && send.sdp).toContain("m=video 9 UDP/TLS/RTP/SAVPF 96 98");
   });
 
   it("drops the session on a current-epoch op-failed so the next offer rebuilds clean", () => {
