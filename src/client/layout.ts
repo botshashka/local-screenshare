@@ -1,29 +1,18 @@
 // Pure receiver view model: which device is focused, in what style, and where
 // every tile sits on the stage. The adapter in receiver.ts owns the DOM and
-// applies what this returns — no layout decision is made there.
+// applies what this returns — no layout decision is made there. Geometry is
+// computed as percentages of the stage and applied inline, which is what makes
+// every arrangement unit-testable instead of eyeball-testable.
 //
-// WHY THIS IS DATA, NOT CSS. With two devices the five arrangements
-// (side-by-side / pip-a / pip-b / solo-a / solo-b) fit in five hand-written CSS
-// rulesets keyed off a body class. With four they don't: 4 focus targets × 3
-// stages × 5 grid shapes is a combinatorial explosion no one can keep correct by
-// hand. So geometry is computed here as percentages of the stage and applied
-// inline, which also makes every arrangement unit-testable instead of
-// eyeball-testable.
-//
-// THE REMOTE MODEL — one rule, no extra buttons. The TV's four color keys own the
-// four sender slots (red/green/yellow/blue = A/B/C/D). Pressing a color you are
-// not on focuses that device *keeping the current stage*; pressing the color you
-// are already on advances that device's cycle:
+// THE REMOTE MODEL — one rule, no extra buttons. The TV's four color keys own
+// the four sender slots (red/green/yellow/blue = A/B/C/D). Pressing a color you
+// are not on focuses that device *keeping the current stage*; pressing the color
+// you are already on advances that device's cycle:
 //
 //     Only ──▶ PIP ──▶ All (grid) ──▶ Only ──▶ …
 //
-// This is the two-device behavior generalized rather than a new model: switching
-// devices already carried the corner preference over, and blue's old show/hide-
-// corner toggle is now the middle step of the cycle instead of its own button —
-// which is what frees blue to be Device D.
-//
 // STORED INTENT vs EFFECTIVE VIEW. What the user last chose is kept verbatim;
-// what's actually on screen is derived from it and the current presence by
+// what's actually on screen is derived from it and the current state by
 // `resolveView`, at read time. Nothing ever rewrites the stored view in response
 // to a presence change — which matters because presence is constantly in flux:
 // a receiver reload replays every sender as a separate message, so rewriting on
@@ -31,37 +20,45 @@
 // view before the saved device had even announced itself. Resolving instead
 // means the view snaps back the moment its device reappears.
 //
-// Two things get resolved away: a focus on a device that isn't here (fall back
-// to the wide view — the grid is the only honest thing to show when the subject
-// is gone), and PIP with nobody to put in the corner (renders as Only, and comes
-// back by itself when a second device joins).
+// Three things get resolved away: a focus on a device that isn't here, a focus
+// on a device that has joined but isn't sending frames while another one is
+// (see resolveView), and PIP with nobody to put in the corner.
 
-import {
-  SENDER_IDS,
-  deviceColor,
-  deviceLabel,
-  type DeviceColor,
-  type DeviceId,
-} from "./rtc-utils.js";
+import { SENDER_IDS, deviceLabel, isDeviceId, type DeviceId } from "./rtc-utils.js";
 
 export type ViewMode = "only" | "pip" | "grid";
 
 export interface ViewState {
   mode: ViewMode;
-  // The device the color cycle is "on". Retained through grid so that pressing
-  // its color again wraps back to Only — the last step of the cycle.
+  // The device the color cycle is "on". Meaningless in `grid`, which ignores it
+  // and which resolveView canonicalizes to the first present device.
   focus: DeviceId;
 }
 
 export const initialView: ViewState = { mode: "grid", focus: "device-a" };
 
-// What the stored view actually means right now. Returns the same object when
-// the stored view is already what's on screen, so callers can compare by identity.
-export function resolveView(view: ViewState, present: readonly DeviceId[]): ViewState {
+// What the stored view actually means right now. `present` is every sender the
+// hub says is in the room; `live` is the subset actually sending frames. Returns
+// the same object when the stored view is already what's on screen.
+export function resolveView(
+  view: ViewState,
+  present: readonly DeviceId[],
+  live: readonly DeviceId[] = present,
+): ViewState {
   // Nothing to lay out yet: keep the restored intent intact so a saved
   // "Device A only" still applies the moment Device A arrives.
   if (present.length === 0) return view;
-  if (!present.includes(view.focus)) return { mode: "grid", focus: present[0]! };
+  const wide: ViewState = { mode: "grid", focus: present[0]! };
+  // Canonicalize grid's carried focus, so the effective view is always one
+  // `cycleViews` emits and the dots indicator can always find it.
+  if (view.mode === "grid") return view.focus === present[0] ? view : wide;
+  // The grid is the only honest thing to show when the subject is gone.
+  if (!present.includes(view.focus)) return wide;
+  // Joined is not streaming — senders register with the hub on page load, before
+  // they pick a window. A full-stage waiting ring must never bury a picture that
+  // is live, so fall back to the wide view; but only when there IS one to bury,
+  // so focusing a device before anyone shares still shows that it was focused.
+  if (live.length > 0 && !live.includes(view.focus)) return wide;
   if (view.mode === "pip" && present.length < 2) return { mode: "only", focus: view.focus };
   return view;
 }
@@ -73,51 +70,55 @@ function stagesFor(present: readonly DeviceId[]): ViewMode[] {
 }
 
 export type ViewEvent =
-  // A TV color key (or its 1-4 / r-g-y-b keyboard equivalent): index into SENDER_IDS.
-  | { t: "press-color"; index: number }
+  // A TV color key, or its r-g-y-b / 1-4 keyboard equivalent.
+  | { t: "press-device"; id: DeviceId }
   // The on-screen layout button / L / Space — walks every reachable view in order.
   | { t: "cycle" }
   // A tile was clicked (a PIP corner, or a grid cell): focus it.
   | { t: "select"; id: DeviceId };
 
-// Apply one input. `present` is the set of senders the hub says are in the room,
-// in slot order. Every rule reads the RESOLVED view, so a press always continues
-// from what's on screen rather than from a stored intent that presence has
-// overtaken. Returns the same object identity when nothing changes, so the
-// adapter can skip a re-render — which is what makes a press on a slot nobody has
-// joined a visible no-op (the legend still flashes, showing that slot dimmed).
+// Apply one input. Every rule reads the RESOLVED view, so a press always
+// continues from what's on screen rather than from a stored intent that presence
+// has overtaken. Returns the same object identity when nothing changes, so the
+// adapter can skip a re-render — which is what makes a press on a slot nobody
+// has joined a visible no-op (the legend still flashes, showing that slot dimmed).
 export function viewReduce(
   view: ViewState,
   event: ViewEvent,
   present: readonly DeviceId[],
+  live: readonly DeviceId[] = present,
 ): ViewState {
-  const cur = resolveView(view, present);
+  // Nothing on the stage: nothing to change, and nothing to overwrite the
+  // restored intent with.
+  if (present.length === 0) return view;
+  const cur = resolveView(view, present, live);
   switch (event.t) {
-    case "press-color": {
-      const id = SENDER_IDS[event.index];
-      if (!id || !present.includes(id)) return view;
-      const stages = stagesFor(present);
+    case "press-device": {
+      if (!present.includes(event.id)) return view;
       // From the wide view any color press starts that device's cycle at Only —
       // including the remembered focus, which is how grid wraps round to Only.
-      if (cur.mode === "grid") return { mode: "only", focus: id };
+      if (cur.mode === "grid") return { mode: "only", focus: event.id };
       // A different device: take over the focus but keep the stage, so Only↔Only
       // and PIP↔PIP when flipping between devices.
-      if (cur.focus !== id) return { ...cur, focus: id };
+      if (cur.focus !== event.id) return { ...cur, focus: event.id };
+      const stages = stagesFor(present);
       const i = stages.indexOf(cur.mode);
-      return { mode: stages[(i + 1) % stages.length]!, focus: id };
+      return { mode: stages[(i + 1) % stages.length]!, focus: event.id };
     }
     case "cycle": {
       const views = cycleViews(present);
+      // resolveView only ever yields a view cycleViews emits, so this is never -1.
       const i = views.findIndex((v) => v.mode === cur.mode && v.focus === cur.focus);
-      // Not in the list: restart at the front rather than guessing — findIndex's
-      // -1 would otherwise wrap to the last entry.
-      return views[(i + 1) % views.length] ?? view;
+      return views[(i + 1) % views.length]!;
     }
     case "select": {
       if (!present.includes(event.id)) return view;
-      // Clicking a corner thumbnail swaps focus and stays in PIP; clicking a grid
-      // cell promotes it to Only — the same "start the cycle" rule as a color press.
+      // Clicking a grid cell promotes it to Only — the same "start the cycle"
+      // rule as a color press.
       if (cur.mode === "grid") return { mode: "only", focus: event.id };
+      // The full-bleed pane is already what you're looking at.
+      if (cur.focus === event.id) return view;
+      // A corner thumbnail swaps focus and stays in PIP.
       return { ...cur, focus: event.id };
     }
   }
@@ -127,18 +128,18 @@ export function viewReduce(
 // each present device's stages grouped together. With two devices that's five
 // entries, matching the old five layouts.
 export function cycleViews(present: readonly DeviceId[]): ViewState[] {
-  const focus = present[0] ?? "device-a";
-  if (present.length === 0) return [{ mode: "grid", focus }];
-  const out: ViewState[] = [{ mode: "grid", focus }];
-  for (const id of present) {
-    out.push({ mode: "only", focus: id });
-    if (present.length >= 2) out.push({ mode: "pip", focus: id });
-  }
+  const out: ViewState[] = [{ mode: "grid", focus: present[0] ?? "device-a" }];
+  const stages = stagesFor(present).filter((mode) => mode !== "grid");
+  for (const id of present) for (const mode of stages) out.push({ mode, focus: id });
   return out;
 }
 
-export function cycleIndex(view: ViewState, present: readonly DeviceId[]): number {
-  const cur = resolveView(view, present);
+export function cycleIndex(
+  view: ViewState,
+  present: readonly DeviceId[],
+  live: readonly DeviceId[] = present,
+): number {
+  const cur = resolveView(view, present, live);
   return cycleViews(present).findIndex((v) => v.mode === cur.mode && v.focus === cur.focus);
 }
 
@@ -222,6 +223,7 @@ const JOIN_CARD_SIZE = 22;
 export interface TileInput {
   view: ViewState;
   present: readonly DeviceId[];
+  live?: readonly DeviceId[];
   // Whether joining exists as a concept: rooms only do on a configured
   // (multi-tenant) hub. Whether there is actually a free slot to invite someone
   // into is decided here, not by the caller — it's a fact about the layout.
@@ -238,9 +240,9 @@ export interface TileInput {
 // card instead — making it a third equal cell would shrink the most common setup
 // from today's full-height halves, which is a real loss for an invitation nobody
 // is looking at.
-export function computeTiles({ view, present, canJoin }: TileInput): Tile[] {
+export function computeTiles({ view, present, live, canJoin }: TileInput): Tile[] {
   if (present.length === 0) return [];
-  const { mode, focus } = resolveView(view, present);
+  const { mode, focus } = resolveView(view, present, live ?? present);
   const invite = canJoin && present.length < SENDER_IDS.length;
 
   if (mode === "only") {
@@ -257,10 +259,13 @@ export function computeTiles({ view, present, canJoin }: TileInput): Tile[] {
 
   const joinAsCell = invite && (present.length === 1 || present.length === 3);
   const cells = gridCells(present.length + (joinAsCell ? 1 : 0));
+  // A lone pane covers the whole stage, so it is the same object the `only`
+  // branch draws — no hairline, no name tag, no pointer.
+  const kind = cells.length === 1 ? ("main" as const) : ("cell" as const);
   const tiles: Tile[] = present.map((id, i) => ({
     key: id,
     ...cells[i]!,
-    kind: "cell" as const,
+    kind,
     z: 1,
   }));
   if (joinAsCell) {
@@ -282,10 +287,7 @@ export function computeTiles({ view, present, canJoin }: TileInput): Tile[] {
 // ── Legend / labels ─────────────────────────────────────────────────────────
 
 export interface LegendPill {
-  color: DeviceColor;
   id: DeviceId;
-  label: string;
-  letter: string;
   present: boolean;
   active: boolean;
   // What one more press of this key does, shown on the active pill so the cycle
@@ -293,34 +295,38 @@ export interface LegendPill {
   next: string | null;
 }
 
-const STAGE_LABEL: Record<ViewMode, string> = { only: "Only", pip: "PIP", grid: "All" };
+const STAGE_LABEL: Record<ViewMode, string> = {
+  only: "Only",
+  pip: "Corners",
+  grid: "All screens",
+};
 
-export function viewLabel(view: ViewState, present: readonly DeviceId[]): string {
-  const { mode, focus } = resolveView(view, present);
-  if (mode === "grid") return "All screens";
+export function viewLabel(
+  view: ViewState,
+  present: readonly DeviceId[],
+  live: readonly DeviceId[] = present,
+): string {
+  const { mode, focus } = resolveView(view, present, live);
+  if (mode === "grid") return STAGE_LABEL.grid;
   const name = deviceLabel(focus);
   return mode === "only" ? `${name} only` : `${name} + corners`;
 }
 
-export function legendFor(view: ViewState, present: readonly DeviceId[]): LegendPill[] {
-  const { mode, focus } = resolveView(view, present);
+export function legendFor(
+  view: ViewState,
+  present: readonly DeviceId[],
+  live: readonly DeviceId[] = present,
+): LegendPill[] {
+  const { mode, focus } = resolveView(view, present, live);
   const stages = stagesFor(present);
-  return SENDER_IDS.map((id, i) => {
+  return SENDER_IDS.map((id) => {
     const here = present.includes(id);
     const active = here && mode !== "grid" && focus === id;
     // Only the lit pill advertises its next step. Tagging every pill with one in
     // the wide view would just be four identical hints for the obvious thing
     // (a color shows that screen); the chip above already names the current view.
     const next = active ? STAGE_LABEL[stages[(stages.indexOf(mode) + 1) % stages.length]!] : null;
-    return {
-      color: deviceColor(id),
-      id,
-      label: deviceLabel(id),
-      letter: String.fromCharCode(65 + i),
-      present: here,
-      active,
-      next,
-    };
+    return { id, present: here, active, next };
   });
 }
 
@@ -338,14 +344,12 @@ export function parseView(raw: string | null | undefined): ViewState | null {
   if (!raw) return null;
   const [mode, focus] = raw.split(":");
   if (!MODES.includes(mode as ViewMode)) return null;
-  if (!(SENDER_IDS as readonly string[]).includes(focus ?? "")) return null;
-  return { mode: mode as ViewMode, focus: focus as DeviceId };
+  if (!isDeviceId(focus)) return null;
+  return { mode: mode as ViewMode, focus };
 }
 
 // Read the pre-4-device "layout" key so an existing TV keeps the view it was left
-// on instead of snapping back to the grid on first load. The old `showSecondary`
-// preference needs no migration: it was only ever a way to remember pip-vs-solo,
-// which the layout name already encodes.
+// on instead of snapping back to the grid on first load.
 const LEGACY_VIEWS: Record<string, ViewState> = {
   "side-by-side": { mode: "grid", focus: "device-a" },
   "pip-a": { mode: "pip", focus: "device-a" },

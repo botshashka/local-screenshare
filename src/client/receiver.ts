@@ -12,6 +12,7 @@ import {
   deviceLabel,
   deviceLetter,
   isDeviceId,
+  type DeviceColor,
   type DeviceId,
   type ResTarget,
   type ReceiverInMsg,
@@ -41,6 +42,9 @@ import {
   receiverControllerReduce,
   wantRoomCard,
   roomCardEffect,
+  joinedIds,
+  liveIds,
+  staleJoins,
   initialReceiverControllerState,
   type ReceiverControllerState,
   type ReceiverControllerEvent,
@@ -108,20 +112,15 @@ for (const id of SENDER_IDS) {
   tag.append(dot, document.createTextNode(deviceLabel(id)));
 
   slot.append(video, overlay, tag);
-  // Clicking a pane that shares the screen promotes it; the full-bleed one is
-  // already what you're looking at, so it stays inert (and shows no pointer).
-  slot.addEventListener("click", () => {
-    if (slot.classList.contains("kind-main")) return;
-    dispatchView({ t: "select", id });
-  });
+  // Clicking a pane that shares the screen promotes it. Clicking the full-bleed
+  // one is a no-op, which viewReduce decides — not this handler.
+  slot.addEventListener("click", () => dispatchView({ t: "select", id }));
   stage?.appendChild(slot);
   slots[id] = slot;
   videos[id] = video;
 }
 
 // ── Legend pills ────────────────────────────────────────────────────────────
-// One per remote color, i.e. per device slot, built from the same list — so the
-// on-screen key can't drift from what the keys actually do.
 const legendPills = SENDER_IDS.map((id) => {
   const pill = document.createElement("span");
   pill.className = "pill";
@@ -147,15 +146,20 @@ function showLegend(): void {
 }
 
 // ── View state ──────────────────────────────────────────────────────────────
-// `present` is the set of senders the HUB says are in the room. That, and not
-// the first-frame reveal latch, is what decides which panes exist: a pane has to
-// appear the moment a device joins (so its "waiting" state is visible) and has
-// to keep its place through a transient ICE flap rather than making the whole
-// stage reflow around it. The reveal latch keeps its own separate job — deciding
-// when the room/QR card is in the way (see wantRoomCard).
-const present = new Set<DeviceId>();
-function presentIds(): DeviceId[] {
-  return SENDER_IDS.filter((id) => present.has(id));
+// Two different questions, two different sets, both owned by the controller
+// reducer (see joinedIds / liveIds):
+//   joined — the hub says the sender is in the room. Decides which panes EXIST:
+//     a pane has to appear the moment a device joins, so its "waiting" state is
+//     visible, and has to keep its place through a transient ICE flap rather
+//     than making the whole stage reflow around it.
+//   live   — the sender is actually sending frames. Decides which panes may hold
+//     the FOCUS, because senders register on page load: a device that only
+//     opened the page must not bury a picture that is playing.
+function joined(): DeviceId[] {
+  return joinedIds(rxCtl);
+}
+function live(): DeviceId[] {
+  return liveIds(rxCtl);
 }
 
 // Restore the saved view, falling back through the pre-4-device "layout" key so
@@ -177,8 +181,9 @@ let view: ViewState = restoreView();
 // controls-bar label/dots, and the legend. Slots absent from the computed tiles
 // are hidden — they keep decoding at MIN_TARGET so coming back is instant.
 function renderView(): void {
-  const ids = presentIds();
-  const tiles = computeTiles({ view, present: ids, canJoin: hubConfigured });
+  const ids = joined();
+  const shown = live();
+  const tiles = computeTiles({ view, present: ids, live: shown, canJoin: hubConfigured });
   const placed = new Set<string>();
   for (const tile of tiles) {
     const el = tile.key === "join" ? joinTile : slots[tile.key];
@@ -196,20 +201,20 @@ function renderView(): void {
   for (const [id, el] of Object.entries(slots)) if (!placed.has(id)) el.hidden = true;
   if (joinTile && !placed.has("join")) joinTile.hidden = true;
 
-  if (layoutLabel) layoutLabel.textContent = viewLabel(view, ids);
+  if (layoutLabel) layoutLabel.textContent = viewLabel(view, ids, shown);
   if (layoutDots) {
     const total = cycleViews(ids).length;
     while (layoutDots.childElementCount > total) layoutDots.lastElementChild?.remove();
     while (layoutDots.childElementCount < total) {
       layoutDots.appendChild(document.createElement("span"));
     }
-    const active = cycleIndex(view, ids);
+    const active = cycleIndex(view, ids, shown);
     layoutDots
       .querySelectorAll("span")
       .forEach((el, i) => el.classList.toggle("active", i === active));
   }
-  if (legendView) legendView.textContent = viewLabel(view, ids);
-  legendFor(view, ids).forEach((info, i) => {
+  if (legendView) legendView.textContent = viewLabel(view, ids, shown);
+  legendFor(view, ids, shown).forEach((info, i) => {
     const pill = legendPills[i];
     if (!pill) return;
     pill.pill.classList.toggle("active", info.active);
@@ -225,23 +230,10 @@ function saveView(): void {
 }
 
 function dispatchView(event: ViewEvent): void {
-  const next = viewReduce(view, event, presentIds());
-  // viewReduce returns the same object when the input changes nothing — e.g. a
-  // color key for a slot nobody has joined. The legend still flashes (the caller
-  // shows it), which is what makes the no-op legible rather than silent.
+  const next = viewReduce(view, event, joined(), live());
   if (next === view) return;
   view = next;
   saveView();
-  renderView();
-}
-
-// A sender joined or left the room. The stored view is deliberately left alone:
-// a focus whose device just left resolves to the wide view on its own, and comes
-// back if that device returns.
-function setPresent(id: DeviceId, here: boolean): void {
-  if (here === present.has(id)) return;
-  if (here) present.add(id);
-  else present.delete(id);
   renderView();
 }
 
@@ -368,15 +360,12 @@ function renderRoomPanel(): void {
 
   // Mirror the same QR / domain / code into the on-stage join tile, so the next
   // person can still scan in after the big room card has gone away.
-  document.querySelectorAll<HTMLImageElement>(".join-qr").forEach((el) => {
-    if (qrDataUrl) el.src = qrDataUrl;
-  });
-  document.querySelectorAll(".join-domain").forEach((el) => {
-    el.textContent = location.host;
-  });
-  document.querySelectorAll(".join-code").forEach((el) => {
-    el.textContent = room;
-  });
+  const tileQr = joinTile?.querySelector<HTMLImageElement>(".join-qr");
+  if (tileQr && qrDataUrl) tileQr.src = qrDataUrl;
+  const tileDomain = joinTile?.querySelector(".join-domain");
+  if (tileDomain) tileDomain.textContent = location.host;
+  const tileCode = joinTile?.querySelector(".join-code");
+  if (tileCode) tileCode.textContent = room;
   // Join form: become a sender to *another* screen by typing the code shown on
   // it. Opening the root on a phone mints a throwaway room for this device; this
   // navigates away to the real session (abandoning that throwaway room, which
@@ -472,13 +461,30 @@ function targetForSlot(slot: HTMLElement): ResTarget {
   };
 }
 
+// Last target each sender was told, so an unchanged one isn't re-sent. Every
+// hint that lands costs the sender a getParameters/setParameters round on its
+// encoder, and a changed scaleResolutionDownBy forces a reconfiguration and a
+// keyframe — so re-stating a size it already has is not free. Most renders move
+// one or two panes, and a slot nobody has joined has no listener at all.
+const lastHint: Record<string, ResTarget> = {};
+
+// A fresh socket means the senders behind it may be fresh too: forget what we
+// think they know rather than staying silent on a stale match.
+function resetResHints(): void {
+  for (const id of Object.keys(lastHint)) delete lastHint[id];
+}
+
 function sendResHints(onlyFor?: string): void {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  for (const [to, slot] of Object.entries(slots)) {
+  for (const to of joined()) {
     if (onlyFor && to !== onlyFor) continue;
-    ws.send(
-      JSON.stringify({ type: "res-hint", to, from: "receiver", target: targetForSlot(slot) }),
-    );
+    const slot = slots[to];
+    if (!slot) continue;
+    const target = targetForSlot(slot);
+    const prev = lastHint[to];
+    if (prev && prev.w === target.w && prev.h === target.h) continue;
+    lastHint[to] = target;
+    ws.send(JSON.stringify({ type: "res-hint", to, from: "receiver", target }));
   }
 }
 
@@ -494,9 +500,9 @@ function scheduleResHints(): void {
 // sizes — re-measure when it settles.
 window.addEventListener("resize", scheduleResHints);
 
-// First paint of the stage. Nothing is present yet, so this lays out an empty
-// stage behind the room card; each sender-connected re-runs it. It has to come
-// after scheduleResHints' timer binding, which renderView reaches into.
+// First paint of the stage. Nobody has joined yet, so this lays out an empty
+// stage behind the room card. It has to come after scheduleResHints' timer
+// binding, which renderView reaches into.
 renderView();
 
 // DOM handlers for the controller's reveal-slot / mark-disconnected actions. The
@@ -588,18 +594,27 @@ if (fullscreenBtn) {
 document.addEventListener("fullscreenchange", syncFullscreenUI);
 document.addEventListener("webkitfullscreenchange", syncFullscreenUI as EventListener);
 
-// The four TV remote color buttons ARE the four sender slots, in order — red is
-// Device A, blue is Device D. Pressing the one you're already on advances that
-// device's Only → PIP → All cycle (see layout.ts), which is what lets four
-// devices share four buttons with no extra key to learn. e.key carries
-// "ColorFxName" on modern firmware; keyCode 403–406 is the fallback for sets that
-// don't send it. r/g/y/b and 1–4 are the desktop equivalents.
-const REMOTE_KEYS = [
-  { key: "ColorF0Red", letter: "r", code: 403 },
-  { key: "ColorF1Green", letter: "g", code: 404 },
-  { key: "ColorF2Yellow", letter: "y", code: 405 },
-  { key: "ColorF3Blue", letter: "b", code: 406 },
-] as const;
+// How each remote color announces itself. Keyed BY COLOR, not by position, so it
+// can't drift out of step with the color→device mapping in rtc-utils.ts; the
+// device a press means is then looked up through that mapping rather than
+// re-encoded here. e.key carries "ColorFxName" on modern firmware; keyCode
+// 403–406 is the fallback for sets that don't send it, and r/g/y/b are the
+// desktop equivalents.
+const REMOTE_KEYS: Record<DeviceColor, { key: string; letter: string; code: number }> = {
+  red: { key: "ColorF0Red", letter: "r", code: 403 },
+  green: { key: "ColorF1Green", letter: "g", code: 404 },
+  yellow: { key: "ColorF2Yellow", letter: "y", code: 405 },
+  blue: { key: "ColorF3Blue", letter: "b", code: 406 },
+};
+
+// Which device a keypress selects: its own color key, or its 1-4 position.
+function pressedDevice(e: KeyboardEvent): DeviceId | undefined {
+  const letter = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  return SENDER_IDS.find((id, i) => {
+    const k = REMOTE_KEYS[deviceColor(id)];
+    return k.key === e.key || k.letter === letter || k.code === e.keyCode || e.key === String(i + 1);
+  });
+}
 
 document.addEventListener("keydown", (e) => {
   // While the join popup is up it covers the screen and there's nothing to lay
@@ -616,18 +631,12 @@ document.addEventListener("keydown", (e) => {
     toggleFullscreen();
     return;
   }
-  const letter = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-  let index = REMOTE_KEYS.findIndex(
-    (a) => a.key === e.key || a.letter === letter || a.code === e.keyCode,
-  );
-  if (index < 0 && e.key >= "1" && e.key <= String(SENDER_IDS.length)) {
-    index = Number(e.key) - 1;
-  }
-  if (index >= 0) {
+  const id = pressedDevice(e);
+  if (id) {
     e.preventDefault();
-    dispatchView({ t: "press-color", index });
-    // Always flash the key, even when the press changed nothing — that's what
-    // makes "this slot has nobody in it" legible rather than a dead button.
+    dispatchView({ t: "press-device", id });
+    // Unconditional, so a press on a slot nobody has joined still flashes the
+    // legend with that key dimmed rather than reading as a dead button.
     showLegend();
   }
 });
@@ -781,6 +790,9 @@ function dispatchRx(event: ReceiverControllerEvent): void {
   const { state, actions } = receiverControllerReduce(rxCtl, event);
   rxCtl = state;
   for (const action of actions) applyRxCtl(action);
+  // Membership and the reveal latches both feed the layout, so re-derive the
+  // stage after every controller event, the same way the room card is.
+  renderView();
   applyRoomPanel();
 }
 
@@ -856,41 +868,50 @@ function tearDownSlot(id: string): void {
   delete pcs[id];
 }
 
-// The sender left the room for good: drop its media AND its pane, so the stage
-// rearranges around the devices that are still here.
+// The sender left the room for good: drop its media AND its membership, so the
+// stage rearranges around the devices that are still here.
 function dropSender(id: string): void {
   tearDownSlot(id);
-  if (isDeviceId(id)) setPresent(id, false);
+  dispatchRx({ t: "sender-gone", id });
 }
 
 // ── Presence resync ─────────────────────────────────────────────────────────
-// The hub answers our `register` with one `sender-connected` per live sender, so
-// that burst is an authoritative snapshot of the room. After a reconnect we
-// therefore prune anything we still hold that the burst didn't mention — a
-// sender that left while our socket was down, whose `peer-disconnected` we never
-// received and whose pane would otherwise sit "waiting" forever. Pruning after a
-// short settle window, rather than clearing presence on open, keeps the stage
-// from flashing empty on every reconnect.
-const RESYNC_MS = 1500;
-let resyncSeen: Set<DeviceId> | null = null;
-let resyncTimer: ReturnType<typeof setTimeout> | undefined;
+// The register reply's `sender-connected` burst is an authoritative snapshot of
+// the room, so after a reconnect we prune whatever it didn't mention (see
+// staleJoins) — a sender that left while our socket was down, whose
+// `peer-disconnected` we never received and whose pane would otherwise sit
+// "waiting" forever.
+//
+// The snapshot's end is marked by a `pong`, NOT by a timer. `register` has no ack
+// of its own, but the hub pushes the whole burst in one ordered batch and answers
+// `ping` with `pong`, so a pong is proof the snapshot has already arrived. That
+// matters in both directions: a timer long enough to be safe on a slow link is
+// still a guess, and firing one on a snapshot that never came would tear down
+// every live peer connection and cover the screen with the join card. Here, no
+// pong simply means no prune — the heartbeat is already reconnecting.
+let resyncSeen: Set<string> | null = null;
 
 function beginResync(): void {
   resyncSeen = new Set();
-  clearTimeout(resyncTimer);
-  resyncTimer = setTimeout(endResync, RESYNC_MS);
+}
+
+function cancelResync(): void {
+  resyncSeen = null;
 }
 
 function endResync(): void {
   const seen = resyncSeen;
   resyncSeen = null;
   if (!seen) return;
-  for (const id of presentIds()) if (!seen.has(id)) dropSender(id);
+  for (const id of staleJoins(rxCtl, [...seen])) dropSender(id);
 }
 
 // Signaling doesn't depend on UI init: the DOM lookups above are guarded so
 // module init always reaches this call and the socket always opens.
 function connectWS(): void {
+  // Any resync still in flight belonged to the socket we just lost — the
+  // heartbeat's dead-socket path gets here without going through `onclose`.
+  cancelResync();
   ws = new WebSocket(signalingUrl(room));
   const sock = ws;
 
@@ -904,7 +925,12 @@ function connectWS(): void {
 
   ws.onopen = () => {
     ws.send(JSON.stringify({ type: "register", id: "receiver" }));
+    // Chases the register: its pong is what closes the presence snapshot below.
+    ws.send(JSON.stringify({ type: "ping" }));
     beginResync();
+    // Every sender has to be told our pane sizes again on a fresh socket; the
+    // cache can't know what they still hold.
+    resetResHints();
   };
 
   ws.onmessage = (e: MessageEvent<string>) => {
@@ -916,11 +942,14 @@ function connectWS(): void {
       return;
     }
 
+    // Everything the hub had to say about the room has now been said.
+    if (msg.type === "pong") endResync();
+
     if (msg.type === "sender-connected" && isDeviceId(msg.id)) {
       // A pane appears the moment the hub says the device is here, so its
       // "waiting" state is visible while it decides what to share.
       resyncSeen?.add(msg.id);
-      setPresent(msg.id, true);
+      dispatchRx({ t: "sender-joined", id: msg.id });
       // No speculative PC here: the reducer builds (and rebuilds) the peer
       // connection when the offer arrives, with the recvonly transceivers — so a
       // pre-created one would just be closed and replaced. Sending the initial
@@ -953,6 +982,7 @@ function connectWS(): void {
 
   ws.onclose = () => {
     hb.stop();
+    cancelResync();
     setTimeout(connectWS, 3000);
   };
 }

@@ -25,8 +25,8 @@ import { SENDER_IDS, type DeviceId } from "../src/client/rtc-utils";
 
 const [A, B, C, D] = SENDER_IDS;
 
-function press(view: ViewState, index: number, present: readonly DeviceId[]): ViewState {
-  return viewReduce(view, { t: "press-color", index }, present);
+function press(view: ViewState, id: DeviceId, present: readonly DeviceId[]): ViewState {
+  return viewReduce(view, { t: "press-device", id }, present);
 }
 
 function drive(view: ViewState, events: ViewEvent[], present: readonly DeviceId[]): ViewState {
@@ -37,52 +37,49 @@ describe("the color cycle", () => {
   const all = [A, B, C, D];
 
   it("starts a device's cycle at Only, from the wide view", () => {
-    expect(press({ mode: "grid", focus: A }, 2, all)).toEqual({ mode: "only", focus: C });
+    expect(press({ mode: "grid", focus: A }, C, all)).toEqual({ mode: "only", focus: C });
   });
 
   it("advances Only → PIP → All on repeated presses of the lit color", () => {
     let v: ViewState = { mode: "grid", focus: A };
-    v = press(v, 0, all);
+    v = press(v, A, all);
     expect(v).toEqual({ mode: "only", focus: A });
-    v = press(v, 0, all);
+    v = press(v, A, all);
     expect(v).toEqual({ mode: "pip", focus: A });
-    v = press(v, 0, all);
+    v = press(v, A, all);
     expect(v).toEqual({ mode: "grid", focus: A });
   });
 
   it("wraps back to Only, so the cycle is endless on one key", () => {
     // Four presses of red must return exactly where three started it.
-    const once = press({ mode: "grid", focus: A }, 0, all);
-    const again: ViewEvent = { t: "press-color", index: 0 };
+    const once = press({ mode: "grid", focus: A }, A, all);
+    const again: ViewEvent = { t: "press-device", id: A };
     const round = drive(once, [again, again, again], all);
     expect(round).toEqual(once);
   });
 
   it("keeps the stage when switching to another device", () => {
-    // The corner strip staying up (or staying down) as you flip between devices
-    // is the two-device behavior this generalizes — losing it would be a regression.
-    expect(press({ mode: "pip", focus: A }, 1, all)).toEqual({ mode: "pip", focus: B });
-    expect(press({ mode: "only", focus: A }, 3, all)).toEqual({ mode: "only", focus: D });
+    expect(press({ mode: "pip", focus: A }, B, all)).toEqual({ mode: "pip", focus: B });
+    expect(press({ mode: "only", focus: A }, D, all)).toEqual({ mode: "only", focus: D });
   });
 
   it("is a no-op for a slot nobody has joined", () => {
     const view: ViewState = { mode: "only", focus: A };
-    // Identity, not just equality: the adapter skips re-rendering on it, and the
-    // legend flash is what makes the dead key legible.
-    expect(press(view, 3, [A, B])).toBe(view);
+    // Identity, not just equality — the adapter skips re-rendering on it.
+    expect(press(view, D, [A, B])).toBe(view);
   });
 
   it("drops PIP from the cycle when there is nothing to put in the corner", () => {
     let v: ViewState = { mode: "grid", focus: A };
-    v = press(v, 0, [A]);
+    v = press(v, A, [A]);
     expect(v).toEqual({ mode: "only", focus: A });
-    v = press(v, 0, [A]);
+    v = press(v, A, [A]);
     expect(v.mode).toBe("grid");
   });
 
   it("restores a PIP preference when a second device rejoins", () => {
-    // Stored as pip, rendered as only while alone — so the corner strip comes back
-    // by itself rather than the preference being quietly rewritten away.
+    // Stored as pip, rendered as only while alone, so the corner strip comes
+    // back by itself rather than the preference being rewritten away.
     const view: ViewState = { mode: "pip", focus: A };
     expect(resolveView(view, [A])).toEqual({ mode: "only", focus: A });
     expect(resolveView(view, [A, B])).toBe(view);
@@ -141,6 +138,25 @@ describe("the cycle button", () => {
     expect(v).toEqual(views[0]);
   });
 
+  it("stays findable after a color key wrapped the cycle back to the wide view", () => {
+    // Pressing green three times leaves focus on B while the mode is grid. The
+    // cycle list only ever names the wide view by the FIRST present device, so
+    // an uncanonicalized focus would make the dots indicator draw nothing and
+    // cost the next press (a grid → grid no-op the user sees as a dead button).
+    const wrapped = drive(
+      { mode: "grid", focus: A },
+      [
+        { t: "press-device", id: B },
+        { t: "press-device", id: B },
+        { t: "press-device", id: B },
+      ],
+      [A, B],
+    );
+    expect(wrapped.mode).toBe("grid");
+    expect(cycleIndex(wrapped, [A, B])).toBe(0);
+    expect(viewReduce(wrapped, { t: "cycle" }, [A, B])).toEqual({ mode: "only", focus: A });
+  });
+
   it("reports the position the dots indicator draws", () => {
     expect(cycleIndex({ mode: "pip", focus: B }, [A, B])).toBe(4);
     // A stale PIP with one device reads as the Only it renders as.
@@ -166,6 +182,14 @@ describe("presence changes", () => {
     expect(resolveView(view, [A])).toBe(view);
   });
 
+  it("leaves the restored view alone when the cycle is pressed on an empty stage", () => {
+    // Local `pnpm start` shows no room card, so the layout button and L/Space are
+    // live before anyone shares. Advancing the cycle there would persist the wide
+    // view over the saved one — the exact loss stored intent exists to prevent.
+    const saved: ViewState = { mode: "only", focus: C };
+    expect(viewReduce(saved, { t: "cycle" }, [])).toBe(saved);
+  });
+
   it("restores the saved view once its device finally announces itself", () => {
     // A receiver reload replays each sender as a separate message. Rewriting the
     // stored view on the first arrival would let Device A destroy a saved
@@ -180,7 +204,45 @@ describe("presence changes", () => {
     // Showing the grid (focus absent) and pressing red must start red's cycle at
     // Only — the same as any other press from the wide view.
     const saved: ViewState = { mode: "pip", focus: C };
-    expect(press(saved, 0, [A, B])).toEqual({ mode: "only", focus: A });
+    expect(press(saved, A, [A, B])).toEqual({ mode: "only", focus: A });
+  });
+});
+
+describe("joined vs streaming", () => {
+  // Senders register with the hub when their page LOADS, so "joined" is not
+  // "sending frames". A focus on a device that has only opened the page must not
+  // put a full-stage waiting ring over a picture that is playing.
+  it("gives the stage back to the wide view rather than burying a live picture", () => {
+    expect(resolveView({ mode: "only", focus: A }, [A, B], [B])).toEqual({
+      mode: "grid",
+      focus: A,
+    });
+  });
+
+  it("honors the focus when nothing is live, so a press still shows it landed", () => {
+    const view: ViewState = { mode: "only", focus: A };
+    expect(resolveView(view, [A, B], [])).toBe(view);
+  });
+
+  it("snaps to the focused device the moment its first frame decodes", () => {
+    const view: ViewState = { mode: "only", focus: A };
+    expect(resolveView(view, [A, B], [B]).mode).toBe("grid");
+    expect(resolveView(view, [A, B], [A, B])).toBe(view);
+  });
+
+  it("keeps a press on a joined-but-waiting device as stored intent", () => {
+    // The screen stays wide (B is the one with a picture), but the intent sticks,
+    // so A takes over by itself once it shares.
+    const pressed = viewReduce({ mode: "grid", focus: B }, { t: "press-device", id: A }, [A, B], [B]);
+    expect(pressed).toEqual({ mode: "only", focus: A });
+    expect(resolveView(pressed, [A, B], [B]).mode).toBe("grid");
+    expect(resolveView(pressed, [A, B], [A, B])).toBe(pressed);
+  });
+
+  it("still lays out a pane for a device that has joined but isn't streaming", () => {
+    // The pane has to exist for its "waiting" state to be visible at all.
+    const tiles = computeTiles({ view: initialView, present: [A, B], live: [B], canJoin: false });
+    expect(tiles.map((t) => t.key)).toEqual([A, B]);
   });
 });
 
@@ -225,8 +287,8 @@ describe("tiles", () => {
   });
 
   it("keeps two devices at full-height halves, with the invitation docked", () => {
-    // The common setup must look exactly as it did before four slots existed —
-    // making the join prompt a third equal cell would have shrunk it.
+    // Two devices get full-height halves; the invitation docks rather than
+    // taking a third equal cell, which would shrink both of them.
     const tiles = computeTiles({
       view: { mode: "grid", focus: A },
       present: [A, B],
@@ -249,6 +311,18 @@ describe("tiles", () => {
       expect(tiles).toHaveLength(present.length + 1);
       expect(tiles.reduce((sum, t) => sum + area(t), 0)).toBe(100 * 100);
     }
+  });
+
+  it("draws a lone pane as the full-bleed picture it is, not as a grid cell", () => {
+    // Same object the `only` branch returns: a single picture wears no hairline,
+    // no name tag and no pointer, whatever mode got us here.
+    const tiles = computeTiles({ view: { mode: "grid", focus: A }, present: [A], canJoin: false });
+    expect(tiles).toEqual([
+      { key: A, top: 0, left: 0, width: 100, height: 100, kind: "main", z: 1 },
+    ]);
+    // With the invitation alongside, both halves ARE grid cells.
+    const shared = computeTiles({ view: { mode: "grid", focus: A }, present: [A], canJoin: true });
+    expect(shared.map((t) => t.kind)).toEqual(["cell", "cell"]);
   });
 
   it("tiles the stage exactly, with no overlap, for every device count", () => {
@@ -321,13 +395,8 @@ describe("tiles", () => {
 // ── Legend ──────────────────────────────────────────────────────────────────
 
 describe("legend", () => {
-  it("maps the four remote colors onto the four slots, in order", () => {
-    expect(legendFor(initialView, []).map((p) => [p.color, p.id, p.letter])).toEqual([
-      ["red", A, "A"],
-      ["green", B, "B"],
-      ["yellow", C, "C"],
-      ["blue", D, "D"],
-    ]);
+  it("has one pill per slot, in slot order", () => {
+    expect(legendFor(initialView, []).map((p) => p.id)).toEqual([A, B, C, D]);
   });
 
   it("dims the keys that would do nothing", () => {
@@ -338,10 +407,10 @@ describe("legend", () => {
   it("tells the lit key what one more press does", () => {
     const next = (view: ViewState, present: DeviceId[]): (string | null)[] =>
       legendFor(view, present).map((p) => p.next);
-    expect(next({ mode: "only", focus: A }, [A, B])).toEqual(["PIP", null, null, null]);
-    expect(next({ mode: "pip", focus: A }, [A, B])).toEqual(["All", null, null, null]);
+    expect(next({ mode: "only", focus: A }, [A, B])).toEqual(["Corners", null, null, null]);
+    expect(next({ mode: "pip", focus: A }, [A, B])).toEqual(["All screens", null, null, null]);
     // With one device PIP isn't in the cycle, so Only points straight at All.
-    expect(next({ mode: "only", focus: A }, [A])).toEqual(["All", null, null, null]);
+    expect(next({ mode: "only", focus: A }, [A])).toEqual(["All screens", null, null, null]);
     // Nothing is lit in the wide view — the chip beside the pills names it instead.
     expect(next({ mode: "grid", focus: A }, [A, B])).toEqual([null, null, null, null]);
   });

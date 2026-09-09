@@ -29,6 +29,7 @@
 // "connected" and the room/QR card cannot flash up in the gap.
 
 import { type Epoch } from "./session-protocol.js";
+import { SENDER_IDS, type DeviceId } from "./rtc-utils.js";
 
 // Mirrors RTCPeerConnectionState minus "closed" (self-induced by our own
 // pc.close(); the adapter never forwards it).
@@ -39,6 +40,11 @@ export interface SlotState {
   conn: ConnPhase;
   revealed: boolean; // first-frame latch; NOT reset on rebuild
   retryPending: boolean;
+  // The hub says this sender is in the room. Orthogonal to everything above:
+  // a sender that stops sharing tears its media down but keeps its membership
+  // (and so its pane), and one that merely opened the page has membership with
+  // no media at all — senders register before they pick a window.
+  joined: boolean;
 }
 
 export interface ReceiverControllerState {
@@ -49,7 +55,7 @@ export interface ReceiverControllerState {
 export const initialReceiverControllerState: ReceiverControllerState = { slots: {} };
 
 function emptySlot(): SlotState {
-  return { pcGen: 0, conn: "new", revealed: false, retryPending: false };
+  return { pcGen: 0, conn: "new", revealed: false, retryPending: false, joined: false };
 }
 
 function slotOf(state: ReceiverControllerState, id: string): SlotState {
@@ -86,8 +92,13 @@ export type ReceiverControllerEvent =
   | { t: "liveness-lost"; id: string; gen: Epoch }
   // The re-offer retry timer elapsed.
   | { t: "retry-fired"; id: string; gen: Epoch }
-  // The hub says this sender genuinely left (not a transient flap).
-  | { t: "peer-disconnected"; id: string };
+  // This slot's media ended for good (not a transient flap): the hub says the
+  // sender's socket left, or the sender said it stopped sharing.
+  | { t: "peer-disconnected"; id: string }
+  // The hub says this sender is in the room / is gone from it. Membership only —
+  // media lifecycle is peer-disconnected's job.
+  | { t: "sender-joined"; id: string }
+  | { t: "sender-gone"; id: string };
 
 export type ReceiverControllerAction =
   // Prepare the slot's <video> source for a rebuild. ONLY from offer-arrived.
@@ -124,6 +135,9 @@ export function receiverControllerReduce(
         conn: "connecting",
         revealed: prev.revealed,
         retryPending: false,
+        // Only a sender the hub admitted can offer, so an offer is itself proof
+        // of membership — which self-heals a `sender-connected` we never saw.
+        joined: true,
       };
       const actions: ReceiverControllerAction[] = [{ t: "reset-srcobject", id: event.id }];
       if (prev.retryPending) actions.push({ t: "cancel-retry", id: event.id });
@@ -189,11 +203,30 @@ export function receiverControllerReduce(
       };
     }
 
+    case "sender-joined": {
+      const slot = slotOf(state, event.id);
+      if (slot.joined) return { state, actions: [] };
+      return { state: withSlot(state, event.id, { ...slot, joined: true }), actions: [] };
+    }
+
+    case "sender-gone": {
+      const slot = slotOf(state, event.id);
+      if (!slot.joined) return { state, actions: [] };
+      return { state: withSlot(state, event.id, { ...slot, joined: false }), actions: [] };
+    }
+
     case "peer-disconnected": {
       const slot = slotOf(state, event.id);
-      // The sender truly left: null the source (the ONE place), drop the slot to a
-      // sentinel gen so any later stale gen-tagged event is ignored.
-      const next: SlotState = { pcGen: 0, conn: "new", revealed: false, retryPending: false };
+      // The media truly ended: null the source (the ONE place), drop the slot to a
+      // sentinel gen so any later stale gen-tagged event is ignored. `joined` is
+      // carried over deliberately — a sender that stopped sharing is still here.
+      const next: SlotState = {
+        pcGen: 0,
+        conn: "new",
+        revealed: false,
+        retryPending: false,
+        joined: slot.joined,
+      };
       const actions: ReceiverControllerAction[] = [
         { t: "null-srcobject", id: event.id },
         { t: "mark-disconnected", id: event.id },
@@ -214,6 +247,30 @@ export function receiverControllerReduce(
 export function wantRoomCard(state: ReceiverControllerState, hubConfigured: boolean): boolean {
   if (!hubConfigured) return false;
   return !Object.values(state.slots).some((s) => s.revealed);
+}
+
+// Every sender the hub says is in the room, in slot order — the panes that exist.
+export function joinedIds(state: ReceiverControllerState): DeviceId[] {
+  return SENDER_IDS.filter((id) => state.slots[id]?.joined);
+}
+
+// The subset actually sending frames, in slot order. `revealed` is the right
+// latch: it survives a rebuild, so a flap doesn't read as "stopped", but
+// peer-disconnected clears it, so stopping sharing does.
+export function liveIds(state: ReceiverControllerState): DeviceId[] {
+  return SENDER_IDS.filter((id) => state.slots[id]?.revealed);
+}
+
+// The hub answers our `register` with one `sender-connected` per live sender, so
+// that burst is an authoritative snapshot of the room. Anything we still hold as
+// joined that the snapshot didn't mention left while our socket was down: its
+// `peer-disconnected` never arrived and its pane would otherwise sit "waiting"
+// forever. Returns those ids; the caller drops them.
+export function staleJoins(
+  state: ReceiverControllerState,
+  seen: readonly string[],
+): DeviceId[] {
+  return joinedIds(state).filter((id) => !seen.includes(id));
 }
 
 // The edge-trigger decision the adapter applies. Acting only on a CHANGE (and

@@ -8,6 +8,9 @@ import {
   generateRoomCode,
   ROOM_ALPHABET,
   SENDER_IDS,
+  deviceColor,
+  deviceLetter,
+  deviceLabel,
   HB_INTERVAL_MS,
   HB_TIMEOUT_MS,
 } from "../src/client/rtc-utils";
@@ -146,5 +149,16 @@ describe("room codes", () => {
     expect(core.ROOM_RE.test(ok)).toBe(isValidRoomCode(ok));
     expect(core.ROOM_RE.test("short")).toBe(false);
     expect(core.ROOM_RE.test("0000")).toBe(false); // ambiguous chars excluded
+  });
+
+  it("maps the four remote colors onto the four slots, in order", () => {
+    // The receiver's color keys select by this mapping, so slot order and button
+    // order have to be the same thing.
+    expect(SENDER_IDS.map((id) => [deviceColor(id), deviceLetter(id), deviceLabel(id)])).toEqual([
+      ["red", "A", "Device A"],
+      ["green", "B", "Device B"],
+      ["yellow", "C", "Device C"],
+      ["blue", "D", "Device D"],
+    ]);
   });
 });

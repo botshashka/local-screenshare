@@ -9,9 +9,6 @@ export const STUN: RTCConfiguration = {
 };
 
 // Mirrors SENDER_IDS in src/core/room.ts (drift-guarded by test/signaling.test.ts).
-// Four senders, because the receiver maps them onto the TV remote's four color
-// buttons — that mapping is the limit, and it's the only place the number 4 is a
-// judgement call rather than a consequence.
 export const SENDER_IDS = ["device-a", "device-b", "device-c", "device-d"] as const;
 export type DeviceId = (typeof SENDER_IDS)[number];
 
@@ -21,19 +18,20 @@ export function isDeviceId(id: string | null | undefined): id is DeviceId {
 
 // ── Device identity presentation ────────────────────────────────────────────
 // One definition of "what a slot is called and what color it wears", shared by
-// the receiver (tiles, name tags, legend) and the sender (badge, title). The
-// color is the remote button that selects it, so slot order and button order are
-// the same thing by construction.
-export const DEVICE_COLORS = ["red", "green", "yellow", "blue"] as const;
+// the receiver (tiles, name tags, legend) and the sender (badge, title).
+//
+// The four colors ARE the four slots: a color is the remote button that selects
+// its device, so slot order and button order are the same thing by construction,
+// and that mapping is what caps the roster at four. The letter is rendered
+// *inside* every colored dot, because red/green is the classic colour-vision
+// confusion pair and the identity has to survive without hue.
+const DEVICE_COLORS = ["red", "green", "yellow", "blue"] as const;
 export type DeviceColor = (typeof DEVICE_COLORS)[number];
 
-export function deviceIndex(id: DeviceId): number {
+function deviceIndex(id: DeviceId): number {
   return SENDER_IDS.indexOf(id);
 }
 
-// "device-a" → "A". The letter is rendered *inside* every colored dot, so the
-// identity survives without color — red/green are the classic confusion pair and
-// four colors now carry the whole remote mapping.
 export function deviceLetter(id: DeviceId): string {
   return String.fromCharCode(65 + deviceIndex(id));
 }
@@ -299,6 +297,9 @@ export type SenderInMsg =
   | { type: "res-hint"; target: ResTarget };
 
 export type ReceiverInMsg =
+  // Reply to our own `ping`. Ordered behind the register reply, so it doubles as
+  // the ack `register` itself doesn't have — see the receiver's presence resync.
+  | { type: "pong" }
   | { type: "sender-connected"; id: string }
   | { type: "offer"; from: string; sdp: string }
   | { type: "ice-candidate"; from: string; candidate: RTCIceCandidateInit }

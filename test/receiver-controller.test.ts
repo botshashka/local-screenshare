@@ -4,6 +4,9 @@ import {
   receiverControllerReduce,
   wantRoomCard,
   roomCardEffect,
+  joinedIds,
+  liveIds,
+  staleJoins,
   initialReceiverControllerState,
   type ReceiverControllerState,
   type ReceiverControllerEvent,
@@ -17,6 +20,8 @@ import { harness } from "./reducer-harness";
 // regression in the browser semantic itself, but these prove the *rule*.
 
 const A = "device-a";
+const B = "device-b";
+const C = "device-c";
 
 const { drive, actionsFor } = harness(receiverControllerReduce);
 
@@ -349,6 +354,66 @@ describe("receiverControllerReduce — invariants", () => {
         expect(resets[id]).toBe(offers[id]);
       }
     }
+  });
+
+  // ── Room membership ──────────────────────────────────────────────────────
+  // `joined` answers "is this sender in the room", which is a different question
+  // from "is its media up" — the pane has to exist while a device is still
+  // deciding what to share, and has to survive it stopping.
+  it("sender-joined / sender-gone move membership and nothing else", () => {
+    const { state, actions } = receiverControllerReduce(initialReceiverControllerState, {
+      t: "sender-joined",
+      id: A,
+    });
+    expect(actions).toEqual([]);
+    expect(joinedIds(state)).toEqual([A]);
+    expect(state.slots[A]).toMatchObject({ pcGen: 0, conn: "new", revealed: false });
+
+    const gone = receiverControllerReduce(state, { t: "sender-gone", id: A });
+    expect(gone.actions).toEqual([]);
+    expect(joinedIds(gone.state)).toEqual([]);
+  });
+
+  it("is idempotent, so a replayed snapshot burst changes nothing", () => {
+    const once = drive(initialReceiverControllerState, { t: "sender-joined", id: A });
+    const twice = receiverControllerReduce(once, { t: "sender-joined", id: A });
+    expect(twice.state).toBe(once);
+  });
+
+  it("keeps membership when a sender merely stops sharing", () => {
+    // stream-stopped routes through peer-disconnected: the media goes, the pane
+    // stays, because the device is still sitting in the room.
+    const s = drive(initialReceiverControllerState, { t: "sender-joined", id: A });
+    const streaming = drive(
+      s,
+      { t: "offer-arrived", id: A, gen: 1 },
+      { t: "connection-changed", id: A, gen: 1, state: "connected" },
+      { t: "frame-decoded", id: A, gen: 1 },
+    );
+    expect(liveIds(streaming)).toEqual([A]);
+    const stopped = drive(streaming, { t: "peer-disconnected", id: A });
+    expect(liveIds(stopped)).toEqual([]);
+    expect(joinedIds(stopped)).toEqual([A]);
+  });
+
+  it("treats an offer as proof of membership, healing a missed sender-connected", () => {
+    const s = drive(initialReceiverControllerState, { t: "offer-arrived", id: A, gen: 1 });
+    expect(joinedIds(s)).toEqual([A]);
+  });
+
+  it("staleJoins names the joined senders a fresh snapshot didn't mention", () => {
+    const s = drive(
+      initialReceiverControllerState,
+      { t: "sender-joined", id: A },
+      { t: "sender-joined", id: B },
+    );
+    expect(staleJoins(s, [A, B])).toEqual([]);
+    expect(staleJoins(s, [B])).toEqual([A]);
+    // An empty snapshot means "prune everything", which is why the adapter must
+    // never run one it didn't actually hear back from the hub.
+    expect(staleJoins(s, [])).toEqual([A, B]);
+    // A sender in the snapshot that we don't hold is not our business here.
+    expect(staleJoins(s, [A, B, C])).toEqual([]);
   });
 
   // Drift guard: the controller proves srcObject is *decided* correctly, but the
