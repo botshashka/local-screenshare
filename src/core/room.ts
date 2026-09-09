@@ -133,7 +133,8 @@ function announceGone<K extends ConnKey>(all: Row<K>[], id: string, ops: Op<K>[]
     }
   } else {
     const receiver = liveById(all, RECEIVER);
-    if (receiver) ops.push({ op: "send", to: receiver.key, msg: { type: "peer-disconnected", id } });
+    if (receiver)
+      ops.push({ op: "send", to: receiver.key, msg: { type: "peer-disconnected", id } });
   }
 }
 
@@ -265,7 +266,8 @@ function registerInto<K extends ConnKey>(
   // peer connections) before senders are told to (re)offer.
   if (clientId === RECEIVER) {
     for (const s of SENDER_IDS) {
-      if (liveById(all, s)) ops.push({ op: "send", to: me.key, msg: { type: "sender-connected", id: s } });
+      if (liveById(all, s))
+        ops.push({ op: "send", to: me.key, msg: { type: "sender-connected", id: s } });
     }
     for (const s of SENDER_IDS) {
       const sender = liveById(all, s);

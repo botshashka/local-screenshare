@@ -456,9 +456,7 @@ function startSender(): void {
       }
       case "send-offer": {
         if (myId)
-          ws?.send(
-            JSON.stringify({ type: "offer", to: "receiver", from: myId, sdp: action.sdp }),
-          );
+          ws?.send(JSON.stringify({ type: "offer", to: "receiver", from: myId, sdp: action.sdp }));
         break;
       }
       case "set-remote": {
@@ -524,8 +522,7 @@ function startSender(): void {
         dispatch({ t: "peer-gone" });
         break;
       case "announce-stopped":
-        if (myId)
-          ws?.send(JSON.stringify({ type: "stream-stopped", to: "receiver", from: myId }));
+        if (myId) ws?.send(JSON.stringify({ type: "stream-stopped", to: "receiver", from: myId }));
         break;
       case "schedule-retry":
         if (!retryTimer)
@@ -574,7 +571,8 @@ function startSender(): void {
       // Cancelling a *re-share* picker leaves the live capture untouched (the
       // controller didn't clear it), so don't shout an error over a working
       // share — only surface a failure when nothing is streaming.
-      if (!ctl.capture) setStatus(`Could not start screen share: ${(err as Error).message}`, "error");
+      if (!ctl.capture)
+        setStatus(`Could not start screen share: ${(err as Error).message}`, "error");
     }
   }
 

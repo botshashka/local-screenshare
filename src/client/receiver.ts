@@ -612,7 +612,9 @@ function pressedDevice(e: KeyboardEvent): DeviceId | undefined {
   const letter = e.key.length === 1 ? e.key.toLowerCase() : e.key;
   return SENDER_IDS.find((id, i) => {
     const k = REMOTE_KEYS[deviceColor(id)];
-    return k.key === e.key || k.letter === letter || k.code === e.keyCode || e.key === String(i + 1);
+    return (
+      k.key === e.key || k.letter === letter || k.code === e.keyCode || e.key === String(i + 1)
+    );
   });
 }
 
@@ -753,7 +755,9 @@ function applyReceiver(action: ReceiverAction): void {
       if (!pc || negEpoch[action.id] !== action.epoch) break;
       pc.setRemoteDescription(new RTCSessionDescription({ type: "offer", sdp: action.sdp }))
         .then(() => dispatch({ t: "remote-set", id: action.id, epoch: action.epoch }))
-        .catch(() => dispatch({ t: "op-failed", id: action.id, epoch: action.epoch, op: "remote" }));
+        .catch(() =>
+          dispatch({ t: "op-failed", id: action.id, epoch: action.epoch, op: "remote" }),
+        );
       break;
     }
     case "create-answer": {
@@ -762,14 +766,23 @@ function applyReceiver(action: ReceiverAction): void {
       pc.createAnswer()
         .then(async (answer) => {
           await pc.setLocalDescription(answer);
-          dispatch({ t: "answer-created", id: action.id, epoch: action.epoch, sdp: answer.sdp ?? "" });
+          dispatch({
+            t: "answer-created",
+            id: action.id,
+            epoch: action.epoch,
+            sdp: answer.sdp ?? "",
+          });
         })
-        .catch(() => dispatch({ t: "op-failed", id: action.id, epoch: action.epoch, op: "answer" }));
+        .catch(() =>
+          dispatch({ t: "op-failed", id: action.id, epoch: action.epoch, op: "answer" }),
+        );
       break;
     }
     case "send-answer": {
       if (ws.readyState === WebSocket.OPEN)
-        ws.send(JSON.stringify({ type: "answer", to: action.id, from: "receiver", sdp: action.sdp }));
+        ws.send(
+          JSON.stringify({ type: "answer", to: action.id, from: "receiver", sdp: action.sdp }),
+        );
       break;
     }
     case "add-ice": {

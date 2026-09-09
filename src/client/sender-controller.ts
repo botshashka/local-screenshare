@@ -167,7 +167,10 @@ export function senderControllerReduce(
       // (`conn === "idle"` means no live PC, so the old held capture is safe to
       // replace below; `receiverReady` means we can renegotiate.)
       if (state.conn !== "idle" && !state.receiverReady) {
-        return { state: { ...state, pendingGen: null }, actions: [{ t: "stop-capture", gen: event.gen }] };
+        return {
+          state: { ...state, pendingGen: null },
+          actions: [{ t: "stop-capture", gen: event.gen }],
+        };
       }
 
       // Otherwise bring it online by (re)negotiating a fresh PC — but only if a

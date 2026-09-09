@@ -191,7 +191,10 @@ export function receiverControllerReduce(
         retryPending = true;
         actions.push({ t: "schedule-retry", id: event.id, gen: event.gen });
       }
-      return { state: withSlot(state, event.id, { ...slot, revealed: false, retryPending }), actions };
+      return {
+        state: withSlot(state, event.id, { ...slot, revealed: false, retryPending }),
+        actions,
+      };
     }
 
     case "retry-fired": {
@@ -266,10 +269,7 @@ export function liveIds(state: ReceiverControllerState): DeviceId[] {
 // joined that the snapshot didn't mention left while our socket was down: its
 // `peer-disconnected` never arrived and its pane would otherwise sit "waiting"
 // forever. Returns those ids; the caller drops them.
-export function staleJoins(
-  state: ReceiverControllerState,
-  seen: readonly string[],
-): DeviceId[] {
+export function staleJoins(state: ReceiverControllerState, seen: readonly string[]): DeviceId[] {
   return joinedIds(state).filter((id) => !seen.includes(id));
 }
 
