@@ -1,7 +1,7 @@
 name: Deploy to Cloudflare
 
 # Redeploy the signaling hub (Worker) and the static pages on every push to main.
-# Gates on the test suites + lint first, so a broken commit can't reach prod.
+# Gates on lint, typecheck and the tests first, so a broken commit can't reach prod.
 #
 # Required repository secrets (Settings → Secrets and variables → Actions):
 #   CLOUDFLARE_API_TOKEN   — token with "Workers Scripts: Edit" + "Cloudflare Pages: Edit"
@@ -36,9 +36,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
         working-directory: worker
 
-      # ── Gate: lint + tests (both suites) must pass before anything ships ──
+      # ── Gate: lint, typecheck and tests must pass before anything ships ──
       - run: pnpm lint
-      # `pnpm test` runs both suites (root + worker/); see package.json.
+      # typecheck and test each span the root AND worker/ — a gate scoped to
+      # one workspace reads green with half the tree unchecked.
+      - run: pnpm typecheck
       - run: pnpm test
 
       # ── Deploy the signaling hub (Worker + Durable Object) ──

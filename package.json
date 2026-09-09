@@ -8,6 +8,7 @@
     "start": "node dist/server.js",
     "dev": "pnpm build && concurrently \"tsc -p tsconfig.server.json --watch\" \"tsc -p tsconfig.browser.json --watch\" \"node --watch dist/server.js\"",
     "lint": "oxlint src",
+    "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.browser.json --noEmit && pnpm -C worker typecheck",
     "format": "oxfmt src",
     "test": "vitest run && pnpm -C worker test",
     "test:client": "vitest run"

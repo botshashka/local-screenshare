@@ -1,8 +1,8 @@
 name: CI
 
-# Lint + tests on PRs and feature-branch pushes; `pnpm test` covers both the root
-# and worker/ suites. No secrets, so it runs on forks. (main is gated by
-# deploy.yml, which runs the same checks before shipping.)
+# Lint, typecheck and tests on PRs and feature-branch pushes. No secrets, so it
+# runs on forks. (main is gated by deploy.yml, which runs the same checks before
+# shipping.)
 on:
   pull_request:
   push:
@@ -24,5 +24,7 @@ jobs:
         working-directory: worker
 
       - run: pnpm lint
-      # `pnpm test` runs both suites (root + worker/); see package.json.
+      # typecheck and test each span the root AND worker/ — a gate scoped to
+      # one workspace reads green with half the tree unchecked.
+      - run: pnpm typecheck
       - run: pnpm test
