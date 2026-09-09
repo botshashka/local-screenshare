@@ -103,12 +103,16 @@
     font-weight: 600;
     letter-spacing: 0.02em;
   }
+  /* Even size and flex centring, for the reasons spelled out on .dot in
+     receiver.html. letter-spacing is reset because .badge sets 0.02em, whose
+     trailing space would nudge a single centred glyph off to the left. */
   .badge .dot {
-    width: 15px; height: 15px; border-radius: 50%; flex: none;
+    width: 16px; height: 16px; border-radius: 50%; flex: none;
+    display: flex; align-items: center; justify-content: center;
     background: var(--muted);
     color: #000;
-    font: 700 9px/15px system-ui, sans-serif;
-    text-align: center;
+    font: 700 9px/1 system-ui, sans-serif;
+    letter-spacing: 0;
   }
   body.device-a .badge .dot { background: var(--c-red); }
   body.device-b .badge .dot { background: var(--c-green); }

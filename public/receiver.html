@@ -106,16 +106,27 @@
   }
   .slot.kind-corner .overlay .ring { width: 22px; height: 22px; }
 
-  /* ── Device identity dot (letter inside; see deviceLetter in rtc-utils.ts) ── */
+  /* ── Device identity dot (letter inside; see deviceLetter in rtc-utils.ts) ──
+     The size must stay EVEN. An odd box puts the circle's centre on a half-pixel
+     (15px → 7.5), and glyphs rasterise onto whole pixels, so the letter can only
+     land half a pixel to one side — visibly off, and inconsistently so, since
+     which way it falls depends on the glyph.
+     Centred with flex rather than a line-height equal to the box: that trick
+     relies on the font's ascent/descent split, which a TV's fallback font won't
+     share. The flex box is its own, not the parent's, because width and height
+     don't apply to an inline element — a non-flex parent would render this as a
+     tall ellipse with the letter spilling out of it. */
   .dot {
-    width: 15px;
-    height: 15px;
+    width: 16px;
+    height: 16px;
     border-radius: 50%;
     flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     background: var(--accent, #666);
     color: #000;
-    font: 700 9px/15px system-ui, sans-serif;
-    text-align: center;
+    font: 700 9px/1 system-ui, sans-serif;
     letter-spacing: 0;
   }
 
@@ -142,7 +153,7 @@
   .slot.kind-cell.connected .tag,
   .slot.kind-corner.connected .tag { display: flex; }
   .slot.kind-corner .tag { bottom: 8px; gap: 5px; padding: 3px 9px; font-size: 0.62rem; }
-  .slot.kind-corner .tag .dot { width: 12px; height: 12px; font-size: 8px; line-height: 12px; }
+  .slot.kind-corner .tag .dot { width: 12px; height: 12px; font-size: 8px; }
 
   /* ── Join tile ──
      The invitation to be the next sender, always a full grid cell (one device: a
