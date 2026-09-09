@@ -111,8 +111,6 @@ function showAssigned(id: DeviceId): void {
   const label = deviceLabel(id);
   (document.getElementById("idBadge") as HTMLElement).textContent = label;
   const dot = document.querySelector<HTMLElement>(".badge .dot");
-  // The letter inside the dot, so the identity reads without relying on hue —
-  // four slots now share four colors, red and green among them.
   if (dot) dot.textContent = deviceLetter(id);
   document.body.classList.remove(...SENDER_IDS);
   document.body.classList.add(id); // drives the badge's accent color

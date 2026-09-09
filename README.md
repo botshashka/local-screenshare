@@ -139,7 +139,7 @@ They're independent; you rarely deploy both at once.
 
 ### Joining (rooms)
 
-The **TV** generates a short room code on load and shows it with a **QR code** and a join link. On a phone or laptop, **scan the QR** (or open `…/sender.html?room=CODE`) to land on the sender page already paired to that TV — it's auto-assigned the next free slot, so just hit Share Screen. Prefer typing? The sender page has a join-code box. The code is remembered on the TV across reloads, so senders stay paired. The full join panel hides once a device is streaming, but a compact QR + code stays on the stage until all four slots are taken, so the next person can still scan in.
+The **TV** generates a short room code on load and shows it with a **QR code** and a join link. On a phone or laptop, **scan the QR** (or open `…/sender.html?room=CODE`) to land on the sender page already paired to that TV — it's auto-assigned the next free slot, so just hit Share Screen. Prefer typing? The sender page has a join-code box. The code is remembered on the TV across reloads, so senders stay paired. The full join panel hides once a device is streaming, but **All screens** keeps a compact QR + code on the stage until all four slots are taken, so the next person can still scan in without anyone stopping.
 
 > **Scope:** screenshare is built for **small home networks**. On the hosted hub the code is namespaced by your network (the Worker keys it by `CF-Connecting-IP`), so it only pairs devices on the same LAN — which is why a 4-character code is enough. It's a convenience gate among your own devices, **not** a security boundary: don't rely on it to keep strangers out on a large shared or carrier-NAT (CGNAT) network, where many unrelated LANs can share one egress IP.
 

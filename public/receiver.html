@@ -14,9 +14,7 @@
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
-  /* TV-remote color palette. The four colors ARE the four device slots — red,
-     green, yellow, blue map to Device A, B, C, D in slot order, on the remote,
-     in the legend, and on each pane's name tag. */
+  /* TV-remote color palette (the color→device mapping lives in rtc-utils.ts) */
   :root {
     --c-red: #e5484d;
     --c-green: #30a46c;
@@ -75,10 +73,7 @@
   /* Hide native video placeholder when no source */
   .slot.disconnected video { visibility: hidden; }
 
-  /* ── Empty state overlay ──
-     A pane exists as soon as the hub says its sender is in the room, so this is
-     the "joined, nothing decoded yet" state — and it stays put through a
-     transient ICE flap rather than reflowing the whole stage. */
+  /* ── Empty state overlay ── */
   .slot .overlay {
     position: absolute;
     inset: 0;
@@ -111,10 +106,7 @@
   }
   .slot.kind-corner .overlay .ring { width: 22px; height: 22px; }
 
-  /* ── Device identity dot ──
-     The letter lives INSIDE the colored dot everywhere it appears. Four colors
-     now carry the entire remote mapping, and red/green is the classic
-     colour-vision confusion pair — so the identity has to survive without hue. */
+  /* ── Device identity dot (letter inside; see deviceLetter in rtc-utils.ts) ── */
   .dot {
     width: 15px;
     height: 15px;
@@ -140,8 +132,7 @@
     gap: 8px;
     padding: 6px 14px;
     border-radius: 999px;
-    background: rgba(0,0,0,0.55);
-    backdrop-filter: blur(6px);
+    background: rgba(0,0,0,0.72);
     color: rgba(255,255,255,0.85);
     font-size: 0.8rem;
     pointer-events: none;
@@ -169,8 +160,7 @@
   }
   #joinTile.kind-card {
     border-radius: 12px;
-    background: rgba(13,13,13,0.92);
-    backdrop-filter: blur(8px);
+    background: #0d0d0d;
     box-shadow: 0 6px 24px rgba(0,0,0,0.5);
   }
   .join-inner {
@@ -292,10 +282,7 @@
   }
   #hint.show { opacity: 1; }
 
-  /* ── Color-key legend (shown on a TV color-button press) ──
-     One pill per remote color, i.e. per device slot. The pill of the device
-     you're on states what pressing it AGAIN does (Only → PIP → All), so the
-     cycle documents itself instead of having to be remembered. */
+  /* ── Color-key legend (shown on a TV color-button press) ── */
   #legend {
     position: fixed;
     top: 24px;
@@ -449,9 +436,7 @@
      a single toggle (body.joining) instead of per-element rules. Full-viewport so
      #stage's height:100% still resolves. -->
 <div id="tvView">
-<!-- #stage is filled by receiver.ts: one .slot per entry in SENDER_IDS, built
-     from the shared list so the markup can never disagree with how many devices
-     the hub will admit. -->
+<!-- #stage is filled by receiver.ts: one .slot per entry in SENDER_IDS. -->
 <div id="stage">
   <div class="tile" id="joinTile" hidden>
     <div class="join-inner">
@@ -475,8 +460,7 @@
     </svg>
   </button>
 </div>
-<!-- Pills are built by receiver.ts from the shared slot list, so the legend can
-     never drift from the color→device mapping the keys actually use. -->
+<!-- Pills are built by receiver.ts, one per slot. -->
 <div id="legend"><span id="legendView"></span></div>
 <div id="hint">Colored buttons pick a screen — press one again for corners, then all</div>
 </div><!-- /tvView -->

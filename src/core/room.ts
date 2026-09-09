@@ -14,10 +14,7 @@
 
 // ── Shared constants (the one definition; the client mirrors these in
 // rtc-utils.ts, guarded by a drift test) ────────────────────────────────────
-// Up to four senders share one receiver — the count is set by the TV remote's
-// four color buttons (red/green/yellow/blue map to A/B/C/D on the receiver), which
-// is the only hard limit in the design: everything below is written over the list,
-// not over a fixed pair.
+// The count mirrors the client's remote-color mapping — see rtc-utils.ts.
 export const SENDER_IDS = ["device-a", "device-b", "device-c", "device-d"] as const;
 export const RECEIVER = "receiver";
 

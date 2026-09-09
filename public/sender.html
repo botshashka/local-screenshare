@@ -15,8 +15,7 @@
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
-  /* Shared device palette — mirrors the TV receiver, where these are also the
-     four remote color buttons (A = red, B = green, C = yellow, D = blue). */
+  /* Shared device palette — mirrors the TV receiver's remote-color mapping */
   :root {
     --c-red: #e5484d;
     --c-green: #30a46c;
@@ -104,8 +103,6 @@
     font-weight: 600;
     letter-spacing: 0.02em;
   }
-  /* The assigned letter sits inside the dot so the identity survives without
-     color — four slots share the four remote colors, red and green among them. */
   .badge .dot {
     width: 15px; height: 15px; border-radius: 50%; flex: none;
     background: var(--muted);
