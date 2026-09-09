@@ -1,5 +1,6 @@
 import {
   STUN,
+  SENDER_IDS,
   signalingHost,
   signalingUrl,
   generateRoomCode,
@@ -7,9 +8,28 @@ import {
   persistRoomInUrl,
   startHeartbeat,
   trackConnectionLiveness,
+  deviceColor,
+  deviceLabel,
+  deviceLetter,
+  isDeviceId,
+  type DeviceId,
   type ResTarget,
   type ReceiverInMsg,
 } from "./rtc-utils.js";
+import {
+  initialView,
+  viewReduce,
+  computeTiles,
+  cycleViews,
+  cycleIndex,
+  legendFor,
+  viewLabel,
+  serializeView,
+  parseView,
+  migrateLegacyView,
+  type ViewState,
+  type ViewEvent,
+} from "./layout.js";
 import {
   receiverReduce,
   initialReceiverState,
@@ -38,100 +58,192 @@ declare const qrcode: (
   createDataURL(cellSize?: number, margin?: number): string;
 };
 
-const LAYOUTS = [
-  { cls: "side-by-side", label: "Side by Side" },
-  { cls: "pip-a", label: "Device A Focus" },
-  { cls: "pip-b", label: "Device B Focus" },
-  { cls: "solo-a", label: "Device A Only" },
-  { cls: "solo-b", label: "Device B Only" },
-] as const;
-
-type LayoutCls = (typeof LAYOUTS)[number]["cls"];
-
-// A display:none slot (solo's hidden device) measures 0×0. Keep streaming it at
-// a low-res thumbnail so toggling it back is instant rather than a black frame.
+// A slot that isn't in the current arrangement is display:none and measures
+// 0×0. Keep streaming it at a low-res thumbnail so bringing it back is instant
+// rather than a black frame.
 const MIN_TARGET: ResTarget = { w: 426, h: 240 };
-// .slot has a 0.25s CSS transition; wait it out before measuring final geometry.
+// .tile has a 0.25s CSS transition; wait it out before measuring final geometry.
 const LAYOUT_SETTLE_MS = 300;
-
-let layoutIdx = Math.max(
-  0,
-  LAYOUTS.findIndex((l) => l.cls === localStorage.getItem("layout")),
-);
-
-// Remembered "show the other device in the corner" preference, so turning the
-// corner off persists when you pass through Side by Side and focus again. A
-// focus layout in storage is authoritative; otherwise fall back to the pref.
-let showSecondary = localStorage.getItem("showSecondary") !== "false";
-const initialCls = LAYOUTS[layoutIdx]?.cls;
-if (initialCls === "solo-a" || initialCls === "solo-b") showSecondary = false;
-else if (initialCls === "pip-a" || initialCls === "pip-b") showSecondary = true;
 
 const layoutBtn = document.getElementById("layoutBtn") as HTMLButtonElement;
 const layoutLabel = document.getElementById("layoutLabel") as HTMLElement;
 const layoutDots = document.getElementById("layoutDots") as HTMLElement;
 const hint = document.getElementById("hint") as HTMLElement;
 const legend = document.getElementById("legend") as HTMLElement;
-const blueLabel = document.getElementById("blueLabel") as HTMLElement;
+const legendView = document.getElementById("legendView") as HTMLElement;
+const stage = document.getElementById("stage") as HTMLElement;
+const joinTile = document.getElementById("joinTile") as HTMLElement;
 
-LAYOUTS.forEach(() => {
-  const s = document.createElement("span");
-  layoutDots?.appendChild(s);
+// ── Slots ───────────────────────────────────────────────────────────────────
+// Built from the shared SENDER_IDS rather than written out in the HTML, so the
+// panes, the color keys, and the slots the hub will hand out can never disagree
+// about how many devices exist.
+const slots: Record<string, HTMLElement> = {};
+const videos: Record<string, HTMLVideoElement> = {};
+for (const id of SENDER_IDS) {
+  const slot = document.createElement("div");
+  slot.className = "tile slot disconnected";
+  slot.id = `slot-${id}`;
+  slot.hidden = true;
+  // Its remote-button color, used by the name tag's dot.
+  slot.style.setProperty("--accent", `var(--c-${deviceColor(id)})`);
+
+  const video = document.createElement("video");
+  video.autoplay = true;
+  video.playsInline = true;
+
+  const overlay = document.createElement("div");
+  overlay.className = "overlay";
+  const ring = document.createElement("div");
+  ring.className = "ring";
+  const waiting = document.createElement("span");
+  waiting.textContent = `Waiting for ${deviceLabel(id)}…`;
+  overlay.append(ring, waiting);
+
+  const tag = document.createElement("div");
+  tag.className = "tag";
+  const dot = document.createElement("span");
+  dot.className = "dot";
+  dot.textContent = deviceLetter(id);
+  tag.append(dot, document.createTextNode(deviceLabel(id)));
+
+  slot.append(video, overlay, tag);
+  // Clicking a pane that shares the screen promotes it; the full-bleed one is
+  // already what you're looking at, so it stays inert (and shows no pointer).
+  slot.addEventListener("click", () => {
+    if (slot.classList.contains("kind-main")) return;
+    dispatchView({ t: "select", id });
+  });
+  stage?.appendChild(slot);
+  slots[id] = slot;
+  videos[id] = video;
+}
+
+// ── Legend pills ────────────────────────────────────────────────────────────
+// One per remote color, i.e. per device slot, built from the same list — so the
+// on-screen key can't drift from what the keys actually do.
+const legendPills = SENDER_IDS.map((id) => {
+  const pill = document.createElement("span");
+  pill.className = "pill";
+  pill.style.setProperty("--accent", `var(--c-${deviceColor(id)})`);
+  const dot = document.createElement("span");
+  dot.className = "dot";
+  dot.textContent = deviceLetter(id);
+  const label = document.createElement("span");
+  label.textContent = deviceLabel(id);
+  const next = document.createElement("span");
+  next.className = "next";
+  pill.append(dot, label, next);
+  legend?.appendChild(pill);
+  return { pill, next };
 });
-
-function updateLayoutUI(): void {
-  const layout = LAYOUTS[layoutIdx];
-  if (!layout || !layoutLabel || !layoutDots) return;
-  layoutLabel.textContent = layout.label;
-  layoutDots
-    .querySelectorAll("span")
-    .forEach((s, i) => s.classList.toggle("active", i === layoutIdx));
-}
-updateLayoutUI();
-
-// The color-key legend (top overlay) mirrors the four TV remote buttons.
-// Red/Green/Yellow are destinations highlighting the focused device; Blue
-// toggles the corner picture, so its label is contextual to the layout.
-type ColorName = "red" | "green" | "yellow";
-const LEGEND: Record<LayoutCls, { active: ColorName; blue: string; dim?: boolean }> = {
-  "side-by-side": { active: "yellow", blue: "PIP", dim: true },
-  "pip-a": { active: "red", blue: "PIP" },
-  "solo-a": { active: "red", blue: "PIP" },
-  "pip-b": { active: "green", blue: "PIP" },
-  "solo-b": { active: "green", blue: "PIP" },
-};
-
-function updateLegend(): void {
-  const cls = LAYOUTS[layoutIdx]?.cls;
-  if (!cls || !legend || !blueLabel) return;
-  const info = LEGEND[cls];
-  legend
-    .querySelectorAll<HTMLElement>(".pill")
-    .forEach((p) => p.classList.toggle("active", p.dataset.color === info.active));
-  blueLabel.textContent = info.blue;
-  legend
-    .querySelector<HTMLElement>('.pill[data-color="blue"]')
-    ?.classList.toggle("dim", info.dim ?? false);
-}
-updateLegend();
 
 let legendTimer: ReturnType<typeof setTimeout>;
 function showLegend(): void {
   if (!legend) return;
-  updateLegend();
   legend.classList.add("show");
   clearTimeout(legendTimer);
   legendTimer = setTimeout(() => legend.classList.remove("show"), 4000);
 }
 
-const slots: Record<string, HTMLElement> = {
-  "device-a": document.getElementById("slotA") as HTMLElement,
-  "device-b": document.getElementById("slotB") as HTMLElement,
-};
-const videos: Record<string, HTMLVideoElement> = {
-  "device-a": document.getElementById("videoA") as HTMLVideoElement,
-  "device-b": document.getElementById("videoB") as HTMLVideoElement,
-};
+// ── View state ──────────────────────────────────────────────────────────────
+// `present` is the set of senders the HUB says are in the room. That, and not
+// the first-frame reveal latch, is what decides which panes exist: a pane has to
+// appear the moment a device joins (so its "waiting" state is visible) and has
+// to keep its place through a transient ICE flap rather than making the whole
+// stage reflow around it. The reveal latch keeps its own separate job — deciding
+// when the room/QR card is in the way (see wantRoomCard).
+const present = new Set<DeviceId>();
+function presentIds(): DeviceId[] {
+  return SENDER_IDS.filter((id) => present.has(id));
+}
+
+// Restore the saved view, falling back through the pre-4-device "layout" key so
+// an existing TV keeps the arrangement it was left on.
+function restoreView(): ViewState {
+  return (
+    parseView(localStorage.getItem("view")) ??
+    migrateLegacyView(localStorage.getItem("layout")) ??
+    initialView
+  );
+}
+// The user's stored INTENT. What's actually on screen is derived from it and the
+// current presence inside layout.ts (resolveView) at every read — nothing here
+// rewrites it when a device comes or goes, so a reload can't lose the saved view
+// to whichever sender happens to re-announce itself first.
+let view: ViewState = restoreView();
+
+// Single render path for everything the view decides: tile geometry, the
+// controls-bar label/dots, and the legend. Slots absent from the computed tiles
+// are hidden — they keep decoding at MIN_TARGET so coming back is instant.
+function renderView(): void {
+  const ids = presentIds();
+  const tiles = computeTiles({ view, present: ids, canJoin: hubConfigured });
+  const placed = new Set<string>();
+  for (const tile of tiles) {
+    const el = tile.key === "join" ? joinTile : slots[tile.key];
+    if (!el) continue;
+    placed.add(tile.key);
+    el.hidden = false;
+    el.style.top = `${tile.top}%`;
+    el.style.left = `${tile.left}%`;
+    el.style.width = `${tile.width}%`;
+    el.style.height = `${tile.height}%`;
+    el.style.zIndex = String(tile.z);
+    el.classList.remove("kind-main", "kind-cell", "kind-corner", "kind-card");
+    el.classList.add(`kind-${tile.kind}`);
+  }
+  for (const [id, el] of Object.entries(slots)) if (!placed.has(id)) el.hidden = true;
+  if (joinTile && !placed.has("join")) joinTile.hidden = true;
+
+  if (layoutLabel) layoutLabel.textContent = viewLabel(view, ids);
+  if (layoutDots) {
+    const total = cycleViews(ids).length;
+    while (layoutDots.childElementCount > total) layoutDots.lastElementChild?.remove();
+    while (layoutDots.childElementCount < total) {
+      layoutDots.appendChild(document.createElement("span"));
+    }
+    const active = cycleIndex(view, ids);
+    layoutDots
+      .querySelectorAll("span")
+      .forEach((el, i) => el.classList.toggle("active", i === active));
+  }
+  if (legendView) legendView.textContent = viewLabel(view, ids);
+  legendFor(view, ids).forEach((info, i) => {
+    const pill = legendPills[i];
+    if (!pill) return;
+    pill.pill.classList.toggle("active", info.active);
+    pill.pill.classList.toggle("absent", !info.present);
+    pill.next.textContent = info.next ? `→ ${info.next}` : "";
+  });
+
+  scheduleResHints();
+}
+
+function saveView(): void {
+  localStorage.setItem("view", serializeView(view));
+}
+
+function dispatchView(event: ViewEvent): void {
+  const next = viewReduce(view, event, presentIds());
+  // viewReduce returns the same object when the input changes nothing — e.g. a
+  // color key for a slot nobody has joined. The legend still flashes (the caller
+  // shows it), which is what makes the no-op legible rather than silent.
+  if (next === view) return;
+  view = next;
+  saveView();
+  renderView();
+}
+
+// A sender joined or left the room. The stored view is deliberately left alone:
+// a focus whose device just left resolves to the wide view on its own, and comes
+// back if that device returns.
+function setPresent(id: DeviceId, here: boolean): void {
+  if (here === present.has(id)) return;
+  if (here) present.add(id);
+  else present.delete(id);
+  renderView();
+}
 
 const pcs: Record<string, RTCPeerConnection> = {};
 const retryTimers: Record<string, ReturnType<typeof setTimeout>> = {};
@@ -202,8 +314,6 @@ function playWithSound(video: HTMLVideoElement): void {
 // local `pnpm start` flow is unchanged.
 const params = new URLSearchParams(location.search);
 const hubConfigured = signalingHost() !== null;
-// Gates the per-slot join prompt CSS (only meaningful when rooms exist).
-if (hubConfigured) document.body.classList.add("hub");
 const roomPanel = document.getElementById("roomPanel") as HTMLElement | null;
 
 // The TV owns the room: a code from ?room= (or a previously generated one in
@@ -256,15 +366,15 @@ function renderRoomPanel(): void {
   const img = document.getElementById("roomQr") as HTMLImageElement | null;
   if (img && qrDataUrl) img.src = qrDataUrl;
 
-  // Mirror the same QR / domain / code into each empty-slot join prompt, so a
-  // second sender can still scan in after the big room card has gone away.
-  document.querySelectorAll<HTMLImageElement>(".slot-qr").forEach((el) => {
+  // Mirror the same QR / domain / code into the on-stage join tile, so the next
+  // person can still scan in after the big room card has gone away.
+  document.querySelectorAll<HTMLImageElement>(".join-qr").forEach((el) => {
     if (qrDataUrl) el.src = qrDataUrl;
   });
-  document.querySelectorAll(".slot-domain").forEach((el) => {
+  document.querySelectorAll(".join-domain").forEach((el) => {
     el.textContent = location.host;
   });
-  document.querySelectorAll(".slot-code").forEach((el) => {
+  document.querySelectorAll(".join-code").forEach((el) => {
     el.textContent = room;
   });
   // Join form: become a sender to *another* screen by typing the code shown on
@@ -348,9 +458,6 @@ function applyRoomPanel(): void {
 }
 applyRoomPanel();
 
-const currentLayout = LAYOUTS[layoutIdx];
-if (currentLayout) document.body.classList.add(currentLayout.cls);
-
 let ws: WebSocket;
 
 // Measure a slot's on-screen size in device pixels — the resolution the sender
@@ -383,53 +490,14 @@ function scheduleResHints(): void {
   resHintTimer = setTimeout(() => sendResHints(), LAYOUT_SETTLE_MS);
 }
 
-function applyLayout(newIdx: number): void {
-  if (newIdx === layoutIdx) return;
-  const prev = LAYOUTS[layoutIdx];
-  if (prev) document.body.classList.remove(prev.cls);
-  layoutIdx = newIdx;
-  const next = LAYOUTS[layoutIdx];
-  if (next) document.body.classList.add(next.cls);
-  localStorage.setItem("layout", next?.cls ?? "");
-  if (next?.cls === "pip-a" || next?.cls === "pip-b") showSecondary = true;
-  else if (next?.cls === "solo-a" || next?.cls === "solo-b") showSecondary = false;
-  localStorage.setItem("showSecondary", String(showSecondary));
-  updateLayoutUI();
-  updateLegend();
-  scheduleResHints();
-}
-
 // The TV panel is fixed, but a resized browser window (dev/desktop) changes slot
 // sizes — re-measure when it settles.
 window.addEventListener("resize", scheduleResHints);
 
-function cycleLayout(): void {
-  applyLayout((layoutIdx + 1) % LAYOUTS.length);
-}
-
-function applyByCls(cls: LayoutCls): void {
-  const idx = LAYOUTS.findIndex((l) => l.cls === cls);
-  if (idx >= 0) applyLayout(idx);
-}
-
-// Focus a device, honoring the remembered corner preference — so a hidden
-// corner stays hidden (and "fullscreen single" stays fullscreen) as you flip
-// A↔B or pass through Side by Side.
-function focusDevice(dev: "a" | "b"): void {
-  applyByCls(showSecondary ? `pip-${dev}` : `solo-${dev}`);
-}
-
-function sideBySide(): void {
-  applyByCls("side-by-side");
-}
-
-// Blue: show/hide the non-focused device in the corner. No-op on side-by-side.
-function toggleSecondary(): void {
-  const cls = LAYOUTS[layoutIdx]?.cls;
-  if (cls === "side-by-side" || !cls) return;
-  const dev = cls.endsWith("-a") ? "a" : "b";
-  applyByCls(cls.startsWith("pip") ? `solo-${dev}` : `pip-${dev}`);
-}
+// First paint of the stage. Nothing is present yet, so this lays out an empty
+// stage behind the room card; each sender-connected re-runs it. It has to come
+// after scheduleResHints' timer binding, which renderView reaches into.
+renderView();
 
 // DOM handlers for the controller's reveal-slot / mark-disconnected actions. The
 // srcObject INVARIANT is now enforced by the controller, not by a comment here:
@@ -454,7 +522,7 @@ function revealSlot(id: string): void {
   slot.classList.add("connected");
 }
 
-layoutBtn?.addEventListener("click", cycleLayout);
+layoutBtn?.addEventListener("click", () => dispatchView({ t: "cycle" }));
 
 // ── Fullscreen ──────────────────────────────────────────────────────────────
 // The receiver is a second-screen/TV display, so filling the panel (hiding the
@@ -520,14 +588,17 @@ if (fullscreenBtn) {
 document.addEventListener("fullscreenchange", syncFullscreenUI);
 document.addEventListener("webkitfullscreenchange", syncFullscreenUI as EventListener);
 
-// TV remote color buttons drive direct selection, with r/g/y/b as desktop
-// equivalents. e.key carries "ColorFxName" on modern firmware; keyCode 403–406
-// is the fallback for sets that don't.
-const REMOTE_ACTIONS = [
-  { key: "ColorF0Red", letter: "r", code: 403, run: () => focusDevice("a") },
-  { key: "ColorF1Green", letter: "g", code: 404, run: () => focusDevice("b") },
-  { key: "ColorF2Yellow", letter: "y", code: 405, run: sideBySide },
-  { key: "ColorF3Blue", letter: "b", code: 406, run: toggleSecondary },
+// The four TV remote color buttons ARE the four sender slots, in order — red is
+// Device A, blue is Device D. Pressing the one you're already on advances that
+// device's Only → PIP → All cycle (see layout.ts), which is what lets four
+// devices share four buttons with no extra key to learn. e.key carries
+// "ColorFxName" on modern firmware; keyCode 403–406 is the fallback for sets that
+// don't send it. r/g/y/b and 1–4 are the desktop equivalents.
+const REMOTE_KEYS = [
+  { key: "ColorF0Red", letter: "r", code: 403 },
+  { key: "ColorF1Green", letter: "g", code: 404 },
+  { key: "ColorF2Yellow", letter: "y", code: 405 },
+  { key: "ColorF3Blue", letter: "b", code: 406 },
 ] as const;
 
 document.addEventListener("keydown", (e) => {
@@ -536,7 +607,8 @@ document.addEventListener("keydown", (e) => {
   if (roomPanel && !roomPanel.classList.contains("hidden")) return;
   if (e.key === "l" || e.key === "L" || e.key === " ") {
     e.preventDefault();
-    cycleLayout();
+    dispatchView({ t: "cycle" });
+    showLegend();
     return;
   }
   if (e.key === "f" || e.key === "F") {
@@ -545,21 +617,19 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   const letter = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-  const match = REMOTE_ACTIONS.find(
+  let index = REMOTE_KEYS.findIndex(
     (a) => a.key === e.key || a.letter === letter || a.code === e.keyCode,
   );
-  if (match) {
+  if (index < 0 && e.key >= "1" && e.key <= String(SENDER_IDS.length)) {
+    index = Number(e.key) - 1;
+  }
+  if (index >= 0) {
     e.preventDefault();
-    match.run();
+    dispatchView({ t: "press-color", index });
+    // Always flash the key, even when the press changed nothing — that's what
+    // makes "this slot has nobody in it" legible rather than a dead button.
     showLegend();
   }
-});
-
-document.getElementById("slotB")?.addEventListener("click", () => {
-  if (LAYOUTS[layoutIdx]?.cls === "pip-a") focusDevice("b");
-});
-document.getElementById("slotA")?.addEventListener("click", () => {
-  if (LAYOUTS[layoutIdx]?.cls === "pip-b") focusDevice("a");
 });
 
 let idleTimer: ReturnType<typeof setTimeout>;
@@ -786,6 +856,38 @@ function tearDownSlot(id: string): void {
   delete pcs[id];
 }
 
+// The sender left the room for good: drop its media AND its pane, so the stage
+// rearranges around the devices that are still here.
+function dropSender(id: string): void {
+  tearDownSlot(id);
+  if (isDeviceId(id)) setPresent(id, false);
+}
+
+// ── Presence resync ─────────────────────────────────────────────────────────
+// The hub answers our `register` with one `sender-connected` per live sender, so
+// that burst is an authoritative snapshot of the room. After a reconnect we
+// therefore prune anything we still hold that the burst didn't mention — a
+// sender that left while our socket was down, whose `peer-disconnected` we never
+// received and whose pane would otherwise sit "waiting" forever. Pruning after a
+// short settle window, rather than clearing presence on open, keeps the stage
+// from flashing empty on every reconnect.
+const RESYNC_MS = 1500;
+let resyncSeen: Set<DeviceId> | null = null;
+let resyncTimer: ReturnType<typeof setTimeout> | undefined;
+
+function beginResync(): void {
+  resyncSeen = new Set();
+  clearTimeout(resyncTimer);
+  resyncTimer = setTimeout(endResync, RESYNC_MS);
+}
+
+function endResync(): void {
+  const seen = resyncSeen;
+  resyncSeen = null;
+  if (!seen) return;
+  for (const id of presentIds()) if (!seen.has(id)) dropSender(id);
+}
+
 // Signaling doesn't depend on UI init: the DOM lookups above are guarded so
 // module init always reaches this call and the socket always opens.
 function connectWS(): void {
@@ -802,6 +904,7 @@ function connectWS(): void {
 
   ws.onopen = () => {
     ws.send(JSON.stringify({ type: "register", id: "receiver" }));
+    beginResync();
   };
 
   ws.onmessage = (e: MessageEvent<string>) => {
@@ -813,7 +916,11 @@ function connectWS(): void {
       return;
     }
 
-    if (msg.type === "sender-connected") {
+    if (msg.type === "sender-connected" && isDeviceId(msg.id)) {
+      // A pane appears the moment the hub says the device is here, so its
+      // "waiting" state is visible while it decides what to share.
+      resyncSeen?.add(msg.id);
+      setPresent(msg.id, true);
       // No speculative PC here: the reducer builds (and rebuilds) the peer
       // connection when the offer arrives, with the recvonly transceivers — so a
       // pre-created one would just be closed and replaced. Sending the initial
@@ -838,8 +945,9 @@ function connectWS(): void {
     // (peer-disconnected), or the sender tells us it deliberately stopped sharing
     // (stream-stopped) — the latter blanks the slot instantly instead of waiting
     // out the liveness/heartbeat timeout. Both tear the slot's media down; a future
-    // offer rebuilds it.
-    if (msg.type === "peer-disconnected") tearDownSlot(msg.id);
+    // offer rebuilds it. Only the first means the DEVICE is gone, though: a sender
+    // that stopped sharing is still in the room and keeps its pane.
+    if (msg.type === "peer-disconnected") dropSender(msg.id);
     if (msg.type === "stream-stopped") tearDownSlot(msg.from);
   };
 

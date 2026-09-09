@@ -12,6 +12,9 @@ import {
   computeEncoding,
   adaptStep,
   isDeviceId,
+  deviceLabel,
+  deviceLetter,
+  SENDER_IDS,
   startHeartbeat,
   type DeviceId,
   type QualityPreset,
@@ -105,10 +108,14 @@ function setFavicon(color: FaviconColor): void {
 // state; this fills in the assigned identity). Set the badge label + accent and
 // the tab title from the slot the hub handed us.
 function showAssigned(id: DeviceId): void {
-  const label = id === "device-a" ? "Device A" : "Device B";
+  const label = deviceLabel(id);
   (document.getElementById("idBadge") as HTMLElement).textContent = label;
-  document.body.classList.remove("device-a", "device-b");
-  document.body.classList.add(id); // drives the badge's red/green accent
+  const dot = document.querySelector<HTMLElement>(".badge .dot");
+  // The letter inside the dot, so the identity reads without relying on hue —
+  // four slots now share four colors, red and green among them.
+  if (dot) dot.textContent = deviceLetter(id);
+  document.body.classList.remove(...SENDER_IDS);
+  document.body.classList.add(id); // drives the badge's accent color
   document.title = `Sender: ${label}`;
 }
 
@@ -206,7 +213,9 @@ function startSender(): void {
     if (signalingPhase === "server-down") {
       setStatus("Server disconnected — retrying in 3s…", "error");
     } else if (signalingPhase === "room-full") {
-      setStatus("Two devices are already sharing to this screen — waiting for a free slot…");
+      setStatus(
+        `All ${SENDER_IDS.length} slots on this screen are in use — waiting for a free one…`,
+      );
     } else if (signalingPhase === "joining") {
       setStatus("Joining…");
     } else if (view.status) {

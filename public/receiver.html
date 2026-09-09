@@ -14,7 +14,9 @@
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
-  /* TV-remote color palette, reused for the legend and per-device accents */
+  /* TV-remote color palette. The four colors ARE the four device slots — red,
+     green, yellow, blue map to Device A, B, C, D in slot order, on the remote,
+     in the legend, and on each pane's name tag. */
   :root {
     --c-red: #e5484d;
     --c-green: #30a46c;
@@ -30,23 +32,38 @@
     font-family: system-ui, sans-serif;
   }
 
-  /* ── Layout container ── */
+  /* ── Layout container ──
+     Tile geometry is NOT in this stylesheet: with four devices the arrangements
+     (focus target × Only/PIP/All × grid shape) are far too many to hand-write, so
+     src/client/layout.ts computes each tile's rect as a percentage of the stage
+     and receiver.ts applies it inline. What lives here is only what a tile LOOKS
+     like, per kind. The transition below is what animates every rearrangement. */
   #stage {
     width: 100%;
     height: 100%;
     position: relative;
   }
 
-  .slot {
+  .tile {
     position: absolute;
+    transition: top 0.25s ease, left 0.25s ease, width 0.25s ease, height 0.25s ease;
+  }
+  .tile[hidden] { display: none; }
+
+  .slot {
     background: #111;
     overflow: hidden;
-    transition: all 0.25s ease;
   }
 
-  /* Per-device accent (matches its remote button), used by the side-by-side name tag */
-  #slotA { --accent: var(--c-red); }
-  #slotB { --accent: var(--c-green); }
+  /* A PIP thumbnail is a distinct object floating over the focused picture; a
+     grid cell is a pane of one surface, separated by a hairline instead. */
+  .slot.kind-corner {
+    border: 2px solid #333;
+    border-radius: 8px;
+    cursor: pointer;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.5);
+  }
+  .slot.kind-cell { border: 1px solid #000; cursor: pointer; }
 
   .slot video {
     width: 100%;
@@ -58,7 +75,10 @@
   /* Hide native video placeholder when no source */
   .slot.disconnected video { visibility: hidden; }
 
-  /* ── Empty state overlay ── */
+  /* ── Empty state overlay ──
+     A pane exists as soon as the hub says its sender is in the room, so this is
+     the "joined, nothing decoded yet" state — and it stays put through a
+     transient ICE flap rather than reflowing the whole stage. */
   .slot .overlay {
     position: absolute;
     inset: 0;
@@ -70,41 +90,46 @@
     color: #555;
     font-size: 0.9rem;
     pointer-events: none;
+    text-align: center;
+    padding: 8px;
   }
   .slot.connected .overlay { display: none; }
   .slot.disconnected .overlay { display: flex; }
+  .slot.kind-corner .overlay { font-size: 0.7rem; gap: 8px; }
 
-  /* ── Per-slot join prompt (QR + code) ──
-     Shown in an empty pane once the other device is already streaming, so a
-     second person can scan to join even though the big room card is gone. Shown
-     in every empty pane that's large enough to read — side-by-side, solo
-     (fullscreen), and the big focused pane of a Focus layout — and replaces the
-     waiting ring there. Hidden only in the tiny PiP corner, which keeps the ring.
-     Gated on a configured hub (rooms only exist then). */
-  .slot-join { display: none; flex-direction: column; align-items: center; gap: 12px; }
-  body.hub .slot.disconnected .slot-join { display: flex; }
-  body.hub .slot.disconnected .overlay .ring { display: none; }
-  /* The PiP corner (non-focused pane in a Focus layout): too small for a QR. */
-  body.hub.pip-a #slotB .slot-join,
-  body.hub.pip-b #slotA .slot-join { display: none; }
-  body.hub.pip-a #slotB .overlay .ring,
-  body.hub.pip-b #slotA .overlay .ring { display: block; }
-  .slot-qr {
-    width: 132px;
-    height: 132px;
-    border-radius: 8px;
-    background: #fff;
-    padding: 7px;
-    image-rendering: pixelated;
+  @keyframes pulse {
+    0%, 100% { opacity: 0.25; transform: scale(1); }
+    50%       { opacity: 0.6;  transform: scale(1.08); }
   }
-  .slot-join-text { color: #888; font-size: 0.82rem; }
-  .slot-join-text .slot-domain,
-  .slot-join-text .slot-code {
-    color: #cfcfcf;
-    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  .slot .overlay .ring {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    border: 2px solid #444;
+    animation: pulse 2s ease-in-out infinite;
+    flex: none;
+  }
+  .slot.kind-corner .overlay .ring { width: 22px; height: 22px; }
+
+  /* ── Device identity dot ──
+     The letter lives INSIDE the colored dot everywhere it appears. Four colors
+     now carry the entire remote mapping, and red/green is the classic
+     colour-vision confusion pair — so the identity has to survive without hue. */
+  .dot {
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    flex: none;
+    background: var(--accent, #666);
+    color: #000;
+    font: 700 9px/15px system-ui, sans-serif;
+    text-align: center;
+    letter-spacing: 0;
   }
 
-  /* ── Per-device name tag (shown under each pane in side-by-side) ── */
+  /* ── Per-device name tag ──
+     Shown wherever a pane shares the screen with another (grid cells, PIP
+     corners); a single full-bleed picture needs no label. */
   .slot .tag {
     position: absolute;
     bottom: 16px;
@@ -120,42 +145,59 @@
     color: rgba(255,255,255,0.85);
     font-size: 0.8rem;
     pointer-events: none;
+    white-space: nowrap;
     z-index: 5;
   }
-  .slot .tag .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); flex: none; }
-  body.side-by-side .slot.connected .tag { display: flex; }
+  .slot.kind-cell.connected .tag,
+  .slot.kind-corner.connected .tag { display: flex; }
+  .slot.kind-corner .tag { bottom: 8px; gap: 5px; padding: 3px 9px; font-size: 0.62rem; }
+  .slot.kind-corner .tag .dot { width: 12px; height: 12px; font-size: 8px; line-height: 12px; }
 
-  @keyframes pulse {
-    0%, 100% { opacity: 0.25; transform: scale(1); }
-    50%       { opacity: 0.6;  transform: scale(1.08); }
+  /* ── Join tile ──
+     The invitation to be the next sender. It takes a full grid cell when it fits
+     the grid exactly (one device: a 50/50 alongside; three: the empty fourth
+     cell of the 2×2) and docks as a small card otherwise, so the common
+     two-device side-by-side keeps its full-height panes. */
+  /* :not([hidden]) matters: an id selector would otherwise out-specify the
+     .tile[hidden] rule above and leave the tile on screen when it's laid out. */
+  #joinTile:not([hidden]) {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #0d0d0d;
+    border: 1px solid rgba(255,255,255,0.08);
   }
-  .slot .overlay .ring {
-    width: 40px;
-    height: 40px;
-    border-radius: 50%;
-    border: 2px solid #444;
-    animation: pulse 2s ease-in-out infinite;
+  #joinTile.kind-card {
+    border-radius: 12px;
+    background: rgba(13,13,13,0.92);
+    backdrop-filter: blur(8px);
+    box-shadow: 0 6px 24px rgba(0,0,0,0.5);
   }
-
-  /* ── Layout: side-by-side ── */
-  body.side-by-side #slotA { top: 0; left: 0; width: 50%; height: 100%; border-right: 2px solid #000; }
-  body.side-by-side #slotB { top: 0; left: 50%; width: 50%; height: 100%; }
-
-  /* ── Layout: pip-a (A big, B small) ── */
-  body.pip-a #slotA { top: 0; left: 0; width: 100%; height: 100%; }
-  body.pip-a #slotB { bottom: 24px; right: 24px; width: 28%; height: 28%; top: auto; left: auto; border: 2px solid #333; border-radius: 8px; cursor: pointer; z-index: 10; }
-
-  /* ── Layout: pip-b (B big, A small) ── */
-  body.pip-b #slotA { bottom: 24px; right: 24px; width: 28%; height: 28%; top: auto; left: auto; border: 2px solid #333; border-radius: 8px; cursor: pointer; z-index: 10; }
-  body.pip-b #slotB { top: 0; left: 0; width: 100%; height: 100%; }
-
-  /* ── Layout: solo-a ── */
-  body.solo-a #slotA { top: 0; left: 0; width: 100%; height: 100%; }
-  body.solo-a #slotB { display: none; }
-
-  /* ── Layout: solo-b ── */
-  body.solo-b #slotA { display: none; }
-  body.solo-b #slotB { top: 0; left: 0; width: 100%; height: 100%; }
+  .join-inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    padding: 10px;
+    text-align: center;
+  }
+  #joinTile.kind-card .join-inner { gap: 8px; padding: 8px; }
+  .join-qr {
+    width: 148px;
+    height: 148px;
+    border-radius: 8px;
+    background: #fff;
+    padding: 7px;
+    image-rendering: pixelated;
+  }
+  #joinTile.kind-card .join-qr { width: 104px; height: 104px; padding: 5px; }
+  .join-text { color: #888; font-size: 0.82rem; line-height: 1.5; }
+  #joinTile.kind-card .join-text { font-size: 0.68rem; }
+  .join-text .join-domain,
+  .join-text .join-code {
+    color: #cfcfcf;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
 
   /* ── Controls bar ── */
   #controls {
@@ -250,13 +292,17 @@
   }
   #hint.show { opacity: 1; }
 
-  /* ── Color-key legend (shown on a TV color-button press) ── */
+  /* ── Color-key legend (shown on a TV color-button press) ──
+     One pill per remote color, i.e. per device slot. The pill of the device
+     you're on states what pressing it AGAIN does (Only → PIP → All), so the
+     cycle documents itself instead of having to be remembered. */
   #legend {
     position: fixed;
     top: 24px;
     left: 50%;
     transform: translateX(-50%) translateY(-8px);
     display: flex;
+    align-items: center;
     gap: 10px;
     padding: 10px;
     background: rgba(0,0,0,0.72);
@@ -268,6 +314,15 @@
     z-index: 200;
   }
   #legend.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #legendView {
+    padding: 6px 14px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.14);
+    color: #fff;
+    font-size: 0.8rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
   #legend .pill {
     display: flex;
     align-items: center;
@@ -280,13 +335,10 @@
     white-space: nowrap;
     transition: color 0.2s, background 0.2s, opacity 0.2s;
   }
-  #legend .pill .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
-  #legend .pill[data-color="red"] .dot { background: var(--c-red); }
-  #legend .pill[data-color="green"] .dot { background: var(--c-green); }
-  #legend .pill[data-color="yellow"] .dot { background: var(--c-yellow); }
-  #legend .pill[data-color="blue"] .dot { background: var(--c-blue); }
   #legend .pill.active { color: #fff; background: rgba(255,255,255,0.18); }
-  #legend .pill.dim { opacity: 0.4; }
+  /* A slot nobody has joined: the key does nothing, and says so by fading. */
+  #legend .pill.absent { opacity: 0.32; }
+  #legend .pill .next { color: rgba(255,255,255,0.6); font-size: 0.72rem; }
 
   /* ── Room join panel (code + QR), shown until a device is streaming ── */
   #roomPanel {
@@ -397,36 +449,21 @@
      a single toggle (body.joining) instead of per-element rules. Full-viewport so
      #stage's height:100% still resolves. -->
 <div id="tvView">
+<!-- #stage is filled by receiver.ts: one .slot per entry in SENDER_IDS, built
+     from the shared list so the markup can never disagree with how many devices
+     the hub will admit. -->
 <div id="stage">
-  <div class="slot disconnected" id="slotA">
-    <video id="videoA" autoplay playsinline></video>
-    <div class="overlay">
-      <div class="ring"></div>
-      <span>Waiting for Device A…</span>
-      <div class="slot-join">
-        <img class="slot-qr" alt="Join QR code">
-        <div class="slot-join-text">Scan, or open <span class="slot-domain"></span> · code <span class="slot-code"></span></div>
-      </div>
+  <div class="tile" id="joinTile" hidden>
+    <div class="join-inner">
+      <img class="join-qr" alt="Join QR code">
+      <div class="join-text">Scan, or open <span class="join-domain"></span><br>code <span class="join-code"></span></div>
     </div>
-    <div class="tag"><span class="dot"></span>Device A</div>
-  </div>
-  <div class="slot disconnected" id="slotB">
-    <video id="videoB" autoplay playsinline></video>
-    <div class="overlay">
-      <div class="ring"></div>
-      <span>Waiting for Device B…</span>
-      <div class="slot-join">
-        <img class="slot-qr" alt="Join QR code">
-        <div class="slot-join-text">Scan, or open <span class="slot-domain"></span> · code <span class="slot-code"></span></div>
-      </div>
-    </div>
-    <div class="tag"><span class="dot"></span>Device B</div>
   </div>
 </div>
 
 <div id="controls">
   <button id="layoutBtn">
-    <span id="layoutLabel">Side by Side</span>
+    <span id="layoutLabel">All screens</span>
     <span class="dots" id="layoutDots"></span>
   </button>
   <button id="fullscreenBtn" aria-label="Toggle fullscreen" title="Fullscreen (F)">
@@ -438,13 +475,10 @@
     </svg>
   </button>
 </div>
-<div id="legend">
-  <span class="pill" data-color="red"><span class="dot"></span>Device A</span>
-  <span class="pill" data-color="green"><span class="dot"></span>Device B</span>
-  <span class="pill" data-color="yellow"><span class="dot"></span>Side by Side</span>
-  <span class="pill" data-color="blue"><span class="dot"></span><span id="blueLabel">PIP</span></span>
-</div>
-<div id="hint">L / Space cycles layouts — or use the colored remote buttons</div>
+<!-- Pills are built by receiver.ts from the shared slot list, so the legend can
+     never drift from the color→device mapping the keys actually use. -->
+<div id="legend"><span id="legendView"></span></div>
+<div id="hint">Colored buttons pick a screen — press one again for corners, then all</div>
 </div><!-- /tvView -->
 
 <div id="roomPanel" class="hidden">

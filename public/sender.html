@@ -15,10 +15,13 @@
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
-  /* Shared device palette — mirrors the TV receiver (A = red, B = green) */
+  /* Shared device palette — mirrors the TV receiver, where these are also the
+     four remote color buttons (A = red, B = green, C = yellow, D = blue). */
   :root {
     --c-red: #e5484d;
     --c-green: #30a46c;
+    --c-yellow: #f5d90a;
+    --c-blue: #60a5fa;
     --bg: #0f0f0f;
     --card: #161616;
     --border: rgba(255, 255, 255, 0.08);
@@ -101,9 +104,19 @@
     font-weight: 600;
     letter-spacing: 0.02em;
   }
-  .badge .dot { width: 11px; height: 11px; border-radius: 50%; flex: none; background: var(--muted); }
+  /* The assigned letter sits inside the dot so the identity survives without
+     color — four slots share the four remote colors, red and green among them. */
+  .badge .dot {
+    width: 15px; height: 15px; border-radius: 50%; flex: none;
+    background: var(--muted);
+    color: #000;
+    font: 700 9px/15px system-ui, sans-serif;
+    text-align: center;
+  }
   body.device-a .badge .dot { background: var(--c-red); }
   body.device-b .badge .dot { background: var(--c-green); }
+  body.device-c .badge .dot { background: var(--c-yellow); }
+  body.device-d .badge .dot { background: var(--c-blue); }
 
   /* Status with a state indicator dot (grey → amber → green, like the favicon) */
   .status {

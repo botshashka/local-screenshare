@@ -80,8 +80,8 @@ httpsServer.listen(PORT, "0.0.0.0", () => {
   console.log(
     `\nScreenshare running on https://${lanIp}:${PORT} (senders) + http://${lanIp}:${HTTP_PORT} (TV)`,
   );
-  // Senders are auto-assigned Device A then Device B by arrival order — just
-  // open the one URL on each device. (?id=device-a/-b still works as a hint.)
+  // Senders are auto-assigned Device A…D by arrival order — just open the one
+  // URL on each device. (?id=device-a…-d still works as a hint.)
   console.log(`\n  Sender(s):  https://${lanIp}:${PORT}/sender.html`);
   console.log(`  TV:         http://${lanIp}:${HTTP_PORT}/receiver.html`);
   console.log(

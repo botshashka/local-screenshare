@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
+  SENDER_IDS,
+  RECEIVER,
   onMessage,
   onClose,
   sweep,
@@ -94,16 +96,23 @@ describe("slot assignment", () => {
     expect(assignedId(room, s)).toBe("device-b");
   });
 
-  it("turns a fresh third sender away with room-full (no stealing)", () => {
+  it("fills every slot in arrival order", () => {
     const room = new Room();
-    const a = room.connect();
-    const b = room.connect();
-    const c = room.connect();
-    register(room, a, { role: "sender", token: "ta" });
-    register(room, b, { role: "sender", token: "tb" });
-    register(room, c, { role: "sender", token: "tc" });
-    expect(room.inbox(c).some((m) => m.type === "room-full")).toBe(true);
-    expect(assignedId(room, c)).toBeUndefined();
+    const keys = SENDER_IDS.map(() => room.connect());
+    keys.forEach((k, i) => register(room, k, { role: "sender", token: `t${i}` }));
+    expect(keys.map((k) => assignedId(room, k))).toEqual([...SENDER_IDS]);
+  });
+
+  it("turns a sender away with room-full once every slot is held (no stealing)", () => {
+    const room = new Room();
+    const held = SENDER_IDS.map(() => room.connect());
+    held.forEach((k, i) => register(room, k, { role: "sender", token: `t${i}` }));
+    const extra = room.connect();
+    register(room, extra, { role: "sender", token: "extra" });
+    expect(room.inbox(extra).some((m) => m.type === "room-full")).toBe(true);
+    expect(assignedId(room, extra)).toBeUndefined();
+    // Every incumbent kept its slot.
+    expect(held.map((k) => room.idOf(k))).toEqual([...SENDER_IDS]);
   });
 });
 
@@ -339,7 +348,8 @@ describe("core invariants under random sequences", () => {
     };
   }
 
-  const VALID_IDS = new Set(["device-a", "device-b", "receiver"]);
+  // Derived from the shared list, so widening SENDER_IDS widens the fuzz with it.
+  const VALID_IDS = new Set<string>([...SENDER_IDS, RECEIVER]);
   const TIMEOUT = 30_000;
 
   // Every close (reap or replace) must be preceded in the SAME op list by an
@@ -358,7 +368,8 @@ describe("core invariants under random sequences", () => {
   function checkRoom(room: Room): void {
     const ids = [...room.conns.values()].map((a) => a.id).filter((id): id is string => id !== null);
     for (const id of ids) expect(VALID_IDS.has(id)).toBe(true);
-    // At most one live holder per id (so ≤2 senders + 1 receiver, never a duplicate).
+    // At most one live holder per id (so ≤SENDER_IDS.length senders + 1 receiver,
+    // never a duplicate).
     expect(new Set(ids).size).toBe(ids.length);
   }
 
@@ -369,7 +380,7 @@ describe("core invariants under random sequences", () => {
       const room = new Room();
       const keys: ConnKey[] = [];
       const tokens = ["t0", "t1", "t2", ""];
-      const targets = ["device-a", "device-b", "receiver", "nobody"];
+      const targets = [...SENDER_IDS, RECEIVER, "nobody"];
       let now = 0;
 
       for (let i = 0; i < 400; i++) {
@@ -385,7 +396,9 @@ describe("core invariants under random sequences", () => {
         ] as const);
 
         if (action === "connect") {
-          if (keys.length < 5) keys.push(room.connect(now));
+          // More sockets than slots, so contention (room-full, reclaim, eviction)
+          // is actually exercised rather than everyone always fitting.
+          if (keys.length < SENDER_IDS.length + 3) keys.push(room.connect(now));
           continue;
         }
         if (action === "sweep") {
@@ -398,7 +411,7 @@ describe("core invariants under random sequences", () => {
 
         switch (action) {
           case "register-sender": {
-            const prefer = pick([undefined, "device-a", "device-b"]);
+            const prefer = pick([undefined, ...SENDER_IDS]);
             const ops = room.msg(
               k,
               { type: "register", role: "sender", token: pick(tokens), ...(prefer ? { prefer } : {}) },

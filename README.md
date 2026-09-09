@@ -1,6 +1,6 @@
 # local-screenshare
 
-Stream your screen to a TV or another device on the same network — no accounts, no cloud relay, no installs on the receiver. Two senders, one receiver, pure WebRTC over your LAN.
+Stream your screen to a TV or another device on the same network — no accounts, no cloud relay, no installs on the receiver. Up to four senders, one receiver, pure WebRTC over your LAN.
 
 ## Requirements
 
@@ -25,7 +25,7 @@ pnpm start
 | Sender(s) | `https://<server-ip>:4242/sender.html` |
 | Receiver (TV) | `http://<server-ip>:4243/receiver.html` |
 
-Open the sender URL on each device that should share — the first to join becomes **Device A**, the second **Device B**, assigned automatically by arrival order (no slot to pick). A third device is turned away until one of the two stops. Append `?id=device-a` (or `-b`) to hint a preferred slot; it's honored only when that slot is free, so it can never bump someone already sharing.
+Open the sender URL on each device that should share — devices become **Device A** through **Device D** by arrival order (no slot to pick). A fifth is turned away and waits, claiming the first slot that frees up. Append `?id=device-a` (…`-d`) to hint a preferred slot; it's honored only when that slot is free, so it can never bump someone already sharing.
 
 On first visit, each **sender** will show a self-signed certificate warning — click **Advanced → Proceed** to continue. This only happens once per device.
 
@@ -35,18 +35,24 @@ On the sender page, click **Share Screen** and pick a window or display. Streami
 
 ## Receiver controls
 
-On a TV remote, the four colored buttons select views directly — three colors are destinations and **blue** toggles the corner picture. Each press pops up a color-key legend at the top of the screen, so the buttons are self-explanatory.
+The four colored buttons on a TV remote **are** the four device slots, in join order. That's the whole model — there's no fifth button to learn, because pressing a color you're already on cycles that device's view instead:
 
-| Button | Keyboard | Action |
+| Button | Keyboard | Selects |
 |---|---|---|
-| 🔴 Red | `R` | Focus **Device A** |
-| 🟢 Green | `G` | Focus **Device B** |
-| 🟡 Yellow | `Y` | **Side by Side** |
-| 🔵 Blue | `B` | Show / hide the other device in the corner |
+| 🔴 Red | `R` / `1` | **Device A** |
+| 🟢 Green | `G` / `2` | **Device B** |
+| 🟡 Yellow | `Y` / `3` | **Device C** |
+| 🔵 Blue | `B` / `4` | **Device D** |
 
-Focusing a device keeps the other one in the corner; press blue to hide it (full-screen single). That show/hide-corner choice is remembered — it carries over when you switch between A and B, and even after passing back through Side by Side. This reaches all five layouts: Side by Side, Device A/B Focus (other in corner), and Device A/B Only. In Side by Side, a colored dot and device name label each pane.
+Press a color for a device you're not on and it takes over the screen. Press the color you're **already** on and it advances:
 
-On a desktop you can also cycle the layouts with the on-screen button at the bottom or **L / Space**, and click a picture-in-picture corner to focus that device. The layout is saved across page reloads.
+> **Only** → **+ corners** (the others as thumbnails) → **All screens** → back to Only
+
+Switching devices keeps the current style, so flipping A↔B stays full-screen if you were full-screen and keeps the corner strip if you had one. Pressing a color nobody has joined does nothing and dims that key in the legend. Each press pops up a color-key legend at the top of the screen; the key you're on states what one more press will do, so the cycle explains itself.
+
+**All screens** fits the connected devices to the panel — one fills it, two split it in half, three or four tile it 2×2 — and puts the join QR in the leftover space so the next person can scan in without anyone stopping. Every pane that shares the screen is labeled with its device name and its remote color, with the letter inside the dot so the panes are still tellable apart if the colors aren't.
+
+On a desktop you can also cycle every view with the on-screen button at the bottom or **L / Space**, and click any pane (a grid cell or a corner thumbnail) to bring it to the front. The view is saved across page reloads, and comes back when its device does.
 
 ## Hosting it (zero-install)
 
@@ -133,15 +139,15 @@ They're independent; you rarely deploy both at once.
 
 ### Joining (rooms)
 
-The **TV** generates a short room code on load and shows it with a **QR code** and a join link. On a phone or laptop, **scan the QR** (or open `…/sender.html?room=CODE`) to land on the sender page already paired to that TV — it's auto-assigned the next free slot, so just hit Share Screen. Prefer typing? The sender page has a join-code box. The code is remembered on the TV across reloads, so senders stay paired. The full join panel hides once a device is streaming, but the empty pane keeps showing its own QR + code so a second person can still scan in.
+The **TV** generates a short room code on load and shows it with a **QR code** and a join link. On a phone or laptop, **scan the QR** (or open `…/sender.html?room=CODE`) to land on the sender page already paired to that TV — it's auto-assigned the next free slot, so just hit Share Screen. Prefer typing? The sender page has a join-code box. The code is remembered on the TV across reloads, so senders stay paired. The full join panel hides once a device is streaming, but a compact QR + code stays on the stage until all four slots are taken, so the next person can still scan in.
 
 > **Scope:** screenshare is built for **small home networks**. On the hosted hub the code is namespaced by your network (the Worker keys it by `CF-Connecting-IP`), so it only pairs devices on the same LAN — which is why a 4-character code is enough. It's a convenience gate among your own devices, **not** a security boundary: don't rely on it to keep strangers out on a large shared or carrier-NAT (CGNAT) network, where many unrelated LANs can share one egress IP.
 
 ## Quality & performance
 
-Each stream is encoded to match the size it's actually shown at on the receiver: the TV measures every pane (in real device pixels, so a 4K panel asks for 4K-worth and a 1080p panel for 1080p-worth) and the sender encodes exactly that — no pixels wasted, and nothing softer than its pane. A side-by-side pane is encoded at half-width, a focused stream at the full panel resolution (up to its cap). Because the total encoded pixels stay ≈ the panel's pixel count regardless of how many devices are connected, adding senders doesn't blow up encode/decode cost.
+Each stream is encoded to match the size it's actually shown at on the receiver: the TV measures every pane (in real device pixels, so a 4K panel asks for 4K-worth and a 1080p panel for 1080p-worth) and the sender encodes exactly that — no pixels wasted, and nothing softer than its pane. A half-width pane is encoded at half-width, a quarter of a 2×2 at a quarter, a focused stream at the full panel resolution (up to its cap). Because the total encoded pixels stay ≈ the panel's pixel count regardless of how many devices are connected, going from two senders to four doesn't blow up encode/decode cost — each one just encodes a smaller frame.
 
-The encode cap is the one hardware-dependent knob (VP9 is software-encoded on most machines, so resolution drives CPU). It's controlled by a **quality preset** on the *sender*:
+The encode cap is the one hardware-dependent knob (resolution is what drives encode CPU). It's controlled by a **quality preset** on the *sender*:
 
 | Preset | Resolution cap | Set via |
 |---|---|---|
@@ -171,7 +177,7 @@ The optional serverless signaling hub is a separate self-contained project under
 
 ## How it works
 
-The signaling layer handles **signaling only** — no media passes through it. Video and audio stream directly between sender and receiver via WebRTC (VP9, with the per-stream resolution and bitrate driven by the receiver's measured pane sizes and the sender's quality preset — see [Quality & performance](#quality--performance)). Two ways to run that signaling layer:
+The signaling layer handles **signaling only** — no media passes through it. Video and audio stream directly between sender and receiver via WebRTC (H.264, with the per-stream resolution and bitrate driven by the receiver's measured pane sizes and the sender's quality preset — see [Quality & performance](#quality--performance)). Two ways to run that signaling layer:
 
 - **Local (`server.ts`)** — the Node server listens on both HTTPS (senders) and HTTP (the TV receiver) sharing one WebSocket hub, so an `http`-origin receiver and `https`-origin senders pair over the same channel. The self-signed TLS cert is generated once on first run and persisted in `.certs/`. Best for an isolated/offline LAN. It's a single global hub, so the room code is ignored.
 - **Hosted hub** — any WebSocket host that routes `wss://…/ws?room=CODE` to a per-room hub instance. A ready-made Cloudflare Worker + Durable Object implementation ships in `worker/src/signaling.ts`; it namespaces each code by the client's network (CF-Connecting-IP), so a code is only shared among devices on the same LAN — that network scoping is what lets the code stay short. Real TLS, zero install. See [Hosting it](#hosting-it-zero-install).
