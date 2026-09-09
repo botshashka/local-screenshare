@@ -50,7 +50,7 @@ Press a color for a device you're not on and it takes over the screen. Press the
 
 Switching devices keeps the current style, so flipping A↔B stays full-screen if you were full-screen and keeps the corner strip if you had one. Pressing a color nobody has joined does nothing and dims that key in the legend. Each press pops up a color-key legend at the top of the screen; the key you're on states what one more press will do, so the cycle explains itself.
 
-**All screens** fits the connected devices to the panel — one fills it, two split it in half, three or four tile it 2×2 — and puts the join QR in the leftover space so the next person can scan in without anyone stopping. Every pane that shares the screen is labeled with its device name and its remote color, with the letter inside the dot so the panes are still tellable apart if the colors aren't.
+**All screens** fits the connected devices to the panel — one fills it, two split it in half, three or four tile it 2×2 — and hands the join QR any leftover pane, so the next person can scan in without anyone stopping. Every pane that shares the screen is labeled with its device name and its remote color, with the letter inside the dot so the panes are still tellable apart if the colors aren't.
 
 On a desktop you can also cycle every view with the on-screen button at the bottom or **L / Space**, and click any pane (a grid cell or a corner thumbnail) to bring it to the front. The view is saved across page reloads, and comes back when its device does.
 
@@ -139,7 +139,7 @@ They're independent; you rarely deploy both at once.
 
 ### Joining (rooms)
 
-The **TV** generates a short room code on load and shows it with a **QR code** and a join link. On a phone or laptop, **scan the QR** (or open `…/sender.html?room=CODE`) to land on the sender page already paired to that TV — it's auto-assigned the next free slot, so just hit Share Screen. Prefer typing? The sender page has a join-code box. The code is remembered on the TV across reloads, so senders stay paired. The full join panel hides once a device is streaming, but **All screens** keeps a compact QR + code on the stage until all four slots are taken, so the next person can still scan in without anyone stopping.
+The **TV** generates a short room code on load and shows it with a **QR code** and a join link. On a phone or laptop, **scan the QR** (or open `…/sender.html?room=CODE`) to land on the sender page already paired to that TV — it's auto-assigned the next free slot, so just hit Share Screen. Prefer typing? The sender page has a join-code box. The code is remembered on the TV across reloads, so senders stay paired. The full join panel hides once a device is streaming, but **All screens** gives the QR + code a pane of its own whenever the grid has a spare one (one device sharing, or three), so the next person can scan in without anyone stopping. It never floats over a picture someone is watching, so with two sharing the grid stays two clean halves.
 
 > **Scope:** screenshare is built for **small home networks**. On the hosted hub the code is namespaced by your network (the Worker keys it by `CF-Connecting-IP`), so it only pairs devices on the same LAN — which is why a 4-character code is enough. It's a convenience gate among your own devices, **not** a security boundary: don't rely on it to keep strangers out on a large shared or carrier-NAT (CGNAT) network, where many unrelated LANs can share one egress IP.
 

@@ -195,7 +195,7 @@ function renderView(): void {
     el.style.width = `${tile.width}%`;
     el.style.height = `${tile.height}%`;
     el.style.zIndex = String(tile.z);
-    el.classList.remove("kind-main", "kind-cell", "kind-corner", "kind-card");
+    el.classList.remove("kind-main", "kind-cell", "kind-corner");
     el.classList.add(`kind-${tile.kind}`);
   }
   for (const [id, el] of Object.entries(slots)) if (!placed.has(id)) el.hidden = true;

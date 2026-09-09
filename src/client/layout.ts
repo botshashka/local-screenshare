@@ -157,8 +157,8 @@ export interface Tile {
   width: number;
   height: number;
   // `main` is a full-bleed focused device, `cell` a grid pane, `corner` a PIP
-  // thumbnail, `card` the small docked join prompt. Drives styling only.
-  kind: "main" | "cell" | "corner" | "card";
+  // thumbnail. Drives styling only.
+  kind: "main" | "cell" | "corner";
   z: number;
 }
 
@@ -216,10 +216,6 @@ function cornerTiles(others: readonly DeviceId[]): Tile[] {
   }));
 }
 
-// The docked join card, used when the invitation can't be a grid cell (see
-// computeTiles). Same corner as a PIP thumbnail but sized to keep a QR scannable.
-const JOIN_CARD_SIZE = 22;
-
 export interface TileInput {
   view: ViewState;
   present: readonly DeviceId[];
@@ -234,12 +230,11 @@ export interface TileInput {
 // result is not on screen — the adapter hides it (and it keeps streaming at a
 // thumbnail resolution so bringing it back is instant, never a black frame).
 //
-// The join tile earns a full grid cell only when it fits the grid exactly: one
-// device (a 50/50 with the invitation, the two-device look people already know)
-// or three (the empty fourth cell of the 2×2). At two devices it docks as a small
-// card instead — making it a third equal cell would shrink the most common setup
-// from today's full-height halves, which is a real loss for an invitation nobody
-// is looking at.
+// The invitation is only ever a full grid cell, and only when it fits the grid
+// exactly: one device (a 50/50 with it) or three (the empty fourth cell of the
+// 2×2). At two devices the grid stays two full-height halves and simply doesn't
+// ask — nothing floats over the panes, because an overlay on a picture someone
+// is watching costs more than the invitation is worth.
 export function computeTiles({ view, present, live, canJoin }: TileInput): Tile[] {
   if (present.length === 0) return [];
   const { mode, focus } = resolveView(view, present, live ?? present);
@@ -270,16 +265,6 @@ export function computeTiles({ view, present, live, canJoin }: TileInput): Tile[
   }));
   if (joinAsCell) {
     tiles.push({ key: "join", ...cells[present.length]!, kind: "cell", z: 1 });
-  } else if (invite) {
-    tiles.push({
-      key: "join",
-      top: 100 - CORNER_BOTTOM - JOIN_CARD_SIZE,
-      left: 100 - CORNER_RIGHT - JOIN_CARD_SIZE,
-      width: JOIN_CARD_SIZE,
-      height: JOIN_CARD_SIZE,
-      kind: "card",
-      z: 10,
-    });
   }
   return tiles;
 }

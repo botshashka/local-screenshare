@@ -145,10 +145,9 @@
   .slot.kind-corner .tag .dot { width: 12px; height: 12px; font-size: 8px; line-height: 12px; }
 
   /* ── Join tile ──
-     The invitation to be the next sender. It takes a full grid cell when it fits
-     the grid exactly (one device: a 50/50 alongside; three: the empty fourth
-     cell of the 2×2) and docks as a small card otherwise, so the common
-     two-device side-by-side keeps its full-height panes. */
+     The invitation to be the next sender, always a full grid cell (one device: a
+     50/50 alongside; three: the empty fourth cell of the 2×2). It never floats
+     over a pane, so there is no card variant. */
   /* :not([hidden]) matters: an id selector would otherwise out-specify the
      .tile[hidden] rule above and leave the tile on screen when it's laid out. */
   #joinTile:not([hidden]) {
@@ -158,11 +157,6 @@
     background: #0d0d0d;
     border: 1px solid rgba(255,255,255,0.08);
   }
-  #joinTile.kind-card {
-    border-radius: 12px;
-    background: #0d0d0d;
-    box-shadow: 0 6px 24px rgba(0,0,0,0.5);
-  }
   .join-inner {
     display: flex;
     flex-direction: column;
@@ -171,7 +165,6 @@
     padding: 10px;
     text-align: center;
   }
-  #joinTile.kind-card .join-inner { gap: 8px; padding: 8px; }
   .join-qr {
     width: 148px;
     height: 148px;
@@ -180,9 +173,7 @@
     padding: 7px;
     image-rendering: pixelated;
   }
-  #joinTile.kind-card .join-qr { width: 104px; height: 104px; padding: 5px; }
   .join-text { color: #888; font-size: 0.82rem; line-height: 1.5; }
-  #joinTile.kind-card .join-text { font-size: 0.68rem; }
   .join-text .join-domain,
   .join-text .join-code {
     color: #cfcfcf;

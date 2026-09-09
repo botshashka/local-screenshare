@@ -286,9 +286,9 @@ describe("tiles", () => {
     expect(tiles[0]).toMatchObject({ key: B, top: 0, left: 0, width: 100, height: 100 });
   });
 
-  it("keeps two devices at full-height halves, with the invitation docked", () => {
-    // Two devices get full-height halves; the invitation docks rather than
-    // taking a third equal cell, which would shrink both of them.
+  it("keeps two devices at full-height halves, and asks nobody to join", () => {
+    // The grid never floats anything over a pane: at two devices there is no
+    // spare cell for the invitation, so it simply isn't shown.
     const tiles = computeTiles({
       view: { mode: "grid", focus: A },
       present: [A, B],
@@ -296,10 +296,17 @@ describe("tiles", () => {
     });
     expect(tileFor(tiles, A)).toMatchObject({ top: 0, left: 0, width: 50, height: 100 });
     expect(tileFor(tiles, B)).toMatchObject({ top: 0, left: 50, width: 50, height: 100 });
-    const join = tileFor(tiles, "join");
-    expect(join.kind).toBe("card");
-    expect(join.width).toBeLessThan(30);
-    expect(inBounds(join)).toBe(true);
+    expect(tiles.some((t) => t.key === "join")).toBe(false);
+  });
+
+  it("never puts a floating tile in the wide view, whatever the device count", () => {
+    for (const present of [[A], [A, B], [A, B, C], [A, B, C, D]]) {
+      const tiles = computeTiles({ view: { mode: "grid", focus: A }, present, canJoin: true });
+      // Every tile is a pane of the grid itself — no corner, no card, nothing
+      // stacked above z 1.
+      expect(tiles.every((t) => t.kind === "cell" || t.kind === "main")).toBe(true);
+      expect(tiles.every((t) => t.z === 1)).toBe(true);
+    }
   });
 
   it("gives the invitation a full cell when it completes the grid", () => {
