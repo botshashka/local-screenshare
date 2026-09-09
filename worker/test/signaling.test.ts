@@ -1,5 +1,8 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { SELF } from "cloudflare:test";
+// The same shared core the Worker itself imports, so slot expectations here are
+// derived from the roster rather than restating a count that can drift from it.
+import { SENDER_IDS } from "../../src/core/room";
 
 // These run inside workerd: each test opens real WebSocket upgrades against the
 // Worker, which routes them to one SignalingRoom Durable Object per room code.
@@ -140,15 +143,15 @@ describe("fetch routing", () => {
 });
 
 describe("slot assignment", () => {
-  it("assigns device-a then device-b by arrival order", async () => {
+  it("fills every slot in arrival order", async () => {
     const room = freshRoom();
-    const a = await connect(room);
-    a.send({ type: "register", role: "sender" });
-    expect((await a.next("assigned")).id).toBe("device-a");
-
-    const b = await connect(room);
-    b.send({ type: "register", role: "sender" });
-    expect((await b.next("assigned")).id).toBe("device-b");
+    const assigned: (string | undefined)[] = [];
+    for (const _ of SENDER_IDS) {
+      const s = await connect(room);
+      s.send({ type: "register", role: "sender" });
+      assigned.push((await s.next("assigned")).id);
+    }
+    expect(assigned).toEqual([...SENDER_IDS]);
   });
 
   it("honors a free prefer hint", async () => {
@@ -157,16 +160,16 @@ describe("slot assignment", () => {
     expect((await a.next("assigned")).id).toBe("device-b");
   });
 
-  it("turns a fresh third sender away with room-full", async () => {
+  it("turns a sender away with room-full once every slot is held", async () => {
     const room = freshRoom();
-    for (let i = 0; i < 2; i++) {
+    for (const _ of SENDER_IDS) {
       const s = await connect(room);
       s.send({ type: "register", role: "sender" });
       await s.next("assigned");
     }
-    const third = await connect(room);
-    third.send({ type: "register", role: "sender" });
-    expect((await third.next()).type).toBe("room-full");
+    const extra = await connect(room);
+    extra.send({ type: "register", role: "sender" });
+    expect((await extra.next()).type).toBe("room-full");
   });
 
   it("isolates rooms: two codes are independent hubs", async () => {

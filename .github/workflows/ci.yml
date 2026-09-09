@@ -1,7 +1,8 @@
 name: CI
 
-# Lint + both test suites on PRs and feature-branch pushes. No secrets, so it runs
-# on forks. (main is gated by deploy.yml, which runs the same checks before shipping.)
+# Lint + tests on PRs and feature-branch pushes; `pnpm test` covers both the root
+# and worker/ suites. No secrets, so it runs on forks. (main is gated by
+# deploy.yml, which runs the same checks before shipping.)
 on:
   pull_request:
   push:
@@ -23,6 +24,5 @@ jobs:
         working-directory: worker
 
       - run: pnpm lint
+      # `pnpm test` runs both suites (root + worker/); see package.json.
       - run: pnpm test
-      - run: pnpm test
-        working-directory: worker

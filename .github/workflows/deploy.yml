@@ -36,11 +36,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
         working-directory: worker
 
-      # ── Gate: lint + both test suites must pass before anything ships ──
+      # ── Gate: lint + tests (both suites) must pass before anything ships ──
       - run: pnpm lint
+      # `pnpm test` runs both suites (root + worker/); see package.json.
       - run: pnpm test
-      - run: pnpm test
-        working-directory: worker
 
       # ── Deploy the signaling hub (Worker + Durable Object) ──
       - run: npx wrangler deploy
